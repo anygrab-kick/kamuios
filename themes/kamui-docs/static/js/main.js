@@ -1166,13 +1166,13 @@ function initTaskBoard(){
       <div class="taskboard-header">
         <div class="tb-title">AIエージェント タスク</div>
         <div class="tb-actions">
-          <button class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
+          <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
         </div>
       </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
         <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (Enterで追加)" autocomplete="off" />
-        <button id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
+        <button type="button" id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
       </div>
     `;
 
@@ -1233,9 +1233,14 @@ function initTaskBoard(){
     hideEl?.addEventListener('click', () => setOpen(false));
     sendEl?.addEventListener('click', () => { addTask(inputEl?.value); if (inputEl) inputEl.value=''; });
     inputEl?.addEventListener('keydown', (e) => {
-      // 日本語IME確定 Enter の重複発火回避
+      // 日本語IME確定 Enter の重複発火回避 + 既定動作抑止
       if (e.isComposing || e.keyCode === 229) return;
-      if (e.key === 'Enter') { addTask(inputEl.value); inputEl.value=''; }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        addTask(inputEl.value);
+        inputEl.value='';
+      }
     });
     listEl?.addEventListener('click', (e) => {
       const btn = e.target.closest('.task-status');
