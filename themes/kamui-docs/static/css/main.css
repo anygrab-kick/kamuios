@@ -906,16 +906,20 @@ pre.code code { color: var(--text); }
   background: rgba(17,24,39,0.98);
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 12px 16px;
   font-size: 0.8rem;
   color: var(--text);
-  white-space: nowrap;
+  white-space: normal;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.2s;
   margin-bottom: 8px;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  min-width: 280px;
+  max-width: 400px;
+  z-index: 10000;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 [data-theme="light"] .mcp-dial-tooltip {
   background: rgba(255,255,255,0.98);
@@ -924,6 +928,53 @@ pre.code code { color: var(--text); }
 
 .mcp-dial-item:hover .mcp-dial-tooltip {
   opacity: 1;
+}
+
+/* ツールチップ内のコンテンツスタイル */
+.mcp-tooltip-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-tooltip-desc {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="light"] .mcp-tooltip-desc {
+  border-bottom-color: rgba(0,0,0,0.1);
+}
+
+.mcp-tooltip-section {
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.mcp-tooltip-section strong {
+  color: #4a9eff;
+  display: block;
+  margin-bottom: 2px;
+}
+[data-theme="light"] .mcp-tooltip-section strong {
+  color: #2563eb;
+}
+
+.mcp-tooltip-section code {
+  display: block;
+  background: rgba(0,0,0,0.3);
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+  font-family: monospace;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+[data-theme="light"] .mcp-tooltip-section code {
+  background: rgba(0,0,0,0.05);
 }
 
 /* 3D軌道エフェクト（オプション） */

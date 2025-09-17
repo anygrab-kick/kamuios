@@ -1182,7 +1182,7 @@ async function initDocMenuTable() {
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
         <div style="position:relative;flex:1;">
-          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (Enterで追加)" autocomplete="off" />
+          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (/でMCPダイヤルを開く、Enterで追加)" autocomplete="off" />
         </div>
         <button type="button" id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
       </div>
@@ -1313,6 +1313,106 @@ async function initDocMenuTable() {
       return state.backendBase;
     }
 
+    // MCPツールの詳細情報マッピング（submit情報など）
+    const mcpToolDetails = {
+      'file-upload-kamui-fal': {
+        endpoint: '/uploader/fal',
+        method: 'POST',
+        params: 'ファイルをmultipart/form-dataで送信',
+        example: 'curl -X POST -F "file=@image.jpg" {BASE_URL}/uploader/fal'
+      },
+      't2i-kamui-flux-schnell': {
+        endpoint: '/t2i/fal/flux/schnell',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト（高速）',
+        example: '{"prompt": "サイバーパンクな東京の夜景"}'
+      },
+      't2i-kamui-flux-krea-lora': {
+        endpoint: '/t2i/fal/flux-krea-lora',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト, lora_scale: LoRA強度',
+        example: '{"prompt": "アニメスタイルのキャラクター", "lora_scale": 0.8}'
+      },
+      't2i-kamui-dreamina-v31': {
+        endpoint: '/t2i/fal/bytedance/dreamina/v3.1/text-to-image',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト, style: スタイル指定',
+        example: '{"prompt": "油絵風の風景画", "style": "oil-painting"}'
+      },
+      't2i-kamui-imagen3': {
+        endpoint: '/t2i/google/imagen',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト（Google Imagen）',
+        example: '{"prompt": "フォトリアルな花の写真"}'
+      },
+      't2i-kamui-imagen4-fast': {
+        endpoint: '/t2i/fal/imagen4/fast',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト, size: 画像サイズ（オプション）',
+        example: '{"prompt": "富士山の美しい写真", "size": "1024x1024"}'
+      },
+      't2i-kamui-imagen4-ultra': {
+        endpoint: '/t2i/fal/imagen4/ultra',
+        method: 'POST',
+        params: 'prompt: 画像生成プロンプト（高品質）, size: 画像サイズ',
+        example: '{"prompt": "詳細な富士山の風景画", "size": "2048x2048"}'
+      },
+      't2i-kamui-ideogram-character-base': {
+        endpoint: '/t2i/fal/ideogram/character-base',
+        method: 'POST',
+        params: 'prompt: キャラクター説明, consistency_mode: 一貫性モード',
+        example: '{"prompt": "勇敢な女性戦士", "consistency_mode": true}'
+      },
+      't2v-kamui-veo3-fast': {
+        endpoint: '/t2v/fal/veo3/fast',
+        method: 'POST',
+        params: 'prompt: ビデオ生成プロンプト, duration: 長さ（秒）',
+        example: '{"prompt": "走る猫のアニメーション", "duration": 5}'
+      },
+      't2v-kamui-wan-v2-2-5b-fast': {
+        endpoint: '/t2v/fal/wan/v2.2-5b/text-to-video/fast-wan',
+        method: 'POST',
+        params: 'prompt: ビデオ生成プロンプト, fps: フレームレート',
+        example: '{"prompt": "空を飛ぶ鳥", "fps": 24}'
+      },
+      'i2i-kamui-aura-sr': {
+        endpoint: '/i2i/fal/aura-sr',
+        method: 'POST',
+        params: 'image_url: 元画像URL, scale: 拡大倍率',
+        example: '{"image_url": "https://example.com/image.jpg", "scale": 4}'
+      },
+      'i2i-kamui-flux-kontext-lora': {
+        endpoint: '/i2i/fal/flux/kontext',
+        method: 'POST',
+        params: 'image_url: 元画像URL, prompt: 編集指示',
+        example: '{"image_url": "base64://...", "prompt": "背景を夕焼けに変更"}'
+      },
+      'i2i-kamui-ideogram-character-remix': {
+        endpoint: '/i2i/fal/ideogram/character-remix',
+        method: 'POST',
+        params: 'image_url: キャラクター画像, style: 新しいスタイル',
+        example: '{"image_url": "base64://...", "style": "cyberpunk"}'
+      },
+      'i2i-kamui-qwen-image-edit': {
+        endpoint: '/i2i/fal/qwen/image-edit',
+        method: 'POST',
+        params: 'image_url: 元画像, prompt: 編集指示',
+        example: '{"image_url": "base64://...", "prompt": "人物を削除して背景のみに"}'
+      },
+      'train-kamui-flux-kontext': {
+        endpoint: '/train/fal/flux/kontext',
+        method: 'POST',
+        params: 'images: 学習画像配列, model_name: モデル名',
+        example: '{"images": ["url1", "url2"], "model_name": "my-style"}'
+      },
+      'video-analysis-kamui': {
+        endpoint: '/video-analysis/google/gemini',
+        method: 'POST',
+        params: 'video_url: ビデオURL, prompt: 分析指示',
+        example: '{"video_url": "https://example.com/video.mp4", "prompt": "このビデオの要約を作成"}'
+      }
+    };
+
     async function loadMCPTools(){
       // バックエンド（Node.jsサーバー）から、現在参照中のMCP定義を取得
       try {
@@ -1321,13 +1421,22 @@ async function initDocMenuTable() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const servers = Array.isArray(data.servers) ? data.servers : [];
-        // ツール配列に正規化（name/description）
-        state.mcpTools = servers.map((s, idx) => ({
-          name: String(s.name || `tool-${idx+1}`),
-          description: String(s.description || s.url || ''),
-          icon: guessIconFromName(String(s.name || '')),
-          color: guessColorFromName(String(s.name || ''))
-        }));
+        // ツール配列に正規化（name/description + 詳細情報）
+        state.mcpTools = servers.map((s, idx) => {
+          const toolName = String(s.name || `tool-${idx+1}`);
+          const details = mcpToolDetails[toolName] || {};
+          return {
+            name: toolName,
+            description: String(s.description || s.url || ''),
+            icon: guessIconFromName(toolName),
+            color: guessColorFromName(toolName),
+            // 詳細情報を追加
+            endpoint: details.endpoint || '',
+            method: details.method || 'POST',
+            params: details.params || '',
+            example: details.example || ''
+          };
+        });
       } catch(err) {
         console.warn('Failed to load MCP tools from backend:', err);
         state.mcpTools = [];
@@ -1478,13 +1587,27 @@ async function initDocMenuTable() {
         
         const iconCat = guessIconFromName(tool.name);
         const categoryInfo = getCategoryColors(iconCat);
+        
+        // 詳細なツールチップ内容を構築
+        let tooltipContent = escapeHtml(tool.description);
+        if (tool.endpoint || tool.params || tool.example) {
+          tooltipContent = `
+            <div class="mcp-tooltip-content">
+              <div class="mcp-tooltip-desc">${escapeHtml(tool.description)}</div>
+              ${tool.endpoint ? `<div class="mcp-tooltip-section"><strong>エンドポイント:</strong> ${tool.method} ${escapeHtml(tool.endpoint)}</div>` : ''}
+              ${tool.params ? `<div class="mcp-tooltip-section"><strong>パラメータ:</strong><br>${escapeHtml(tool.params)}</div>` : ''}
+              ${tool.example ? `<div class="mcp-tooltip-section"><strong>使用例:</strong><br><code>${escapeHtml(tool.example)}</code></div>` : ''}
+            </div>
+          `;
+        }
+        
         item.innerHTML = `
           <div class="mcp-dial-item-inner">
             <div class="mcp-dial-icon" style="background: ${categoryInfo.bg};">
               <img src="${categoryInfo.icon}" style="width: 80%; height: 80%; object-fit: contain; filter: brightness(0) invert(1);" />
             </div>
             <div class="mcp-dial-label">${escapeHtml(tool.name)}</div>
-            ${tool.description ? `<div class="mcp-dial-tooltip">${escapeHtml(tool.description)}</div>` : ''}
+            ${tool.description ? `<div class="mcp-dial-tooltip">${tooltipContent}</div>` : ''}
           </div>
         `;
         
