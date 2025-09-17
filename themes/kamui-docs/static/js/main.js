@@ -869,32 +869,187 @@ async function renderPackages(){
 async function renderServers(){
   const serverContainer = document.getElementById('serverCards');
   if (!serverContainer) return;
-  const servers = [
-    { category: 'creative', title: 'Text to Image', vendor: 'FAL', url: 'https://example.com/t2i/fal/imagen4/ultra' },
-    { category: 'creative', title: 'Image to Video', vendor: 'MiniMax', url: 'https://example.com/i2v/fal/minimax/hailuo-02' },
-    { category: 'development', title: 'Code Analysis', vendor: 'Google', url: 'https://example.com/code-analysis/google/gemini' },
-    { category: 'business', title: 'Translation', vendor: 'DeepL', url: 'https://example.com/translate/deepl/v2' }
-  ];
-  servers.forEach(server => {
-    const { category, title, vendor, url } = server;
-    const pathOnly = url.replace(/^https?:\/\/[^\/]+/, '');
-    const card = document.createElement('div');
-    card.className = 'card pastel';
-    setCardGradient(card, title);
-    card.innerHTML = `
-      <div class="card-title">${title}</div>
-      <span class="badge">${category}</span>
-      <span class="badge">${vendor}</span>
-      <div class="endpoint">${pathOnly}</div>
-    `;
-    card.style.cursor = 'pointer';
-    card.addEventListener('click', () => {
-      const usage = buildUsage(category, url);
-      openJsonModal(usage, title);
+  
+  try {
+    // バックエンドからMCPサーバー情報を取得
+    const res = await fetch('http://localhost:7777/api/claude/mcp/servers', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const servers = Array.isArray(data.servers) ? data.servers : [];
+    
+    // 最初の8個のサーバーを表示
+    servers.slice(0, 8).forEach((server, idx) => {
+      const name = String(server.name || `server-${idx+1}`);
+      const desc = String(server.description || server.url || '');
+      const details = mcpToolDetails[name] || {};
+      
+      // カテゴリを推測
+      let category = 'creative';
+      if (name.includes('analysis') || name.includes('train')) category = 'development';
+      if (name.includes('translate') || name.includes('business')) category = 'business';
+      
+      // ベンダーを推測
+      let vendor = 'FAL';
+      if (desc.includes('Google') || name.includes('imagen3')) vendor = 'Google';
+      if (desc.includes('Bytedance')) vendor = 'Bytedance';
+      if (desc.includes('Ideogram')) vendor = 'Ideogram';
+      
+      const card = document.createElement('div');
+      card.className = 'card pastel server-card';
+      card.style.position = 'relative';
+      setCardGradient(card, name);
+      
+      // ツールチップを含むカード内容
+      card.innerHTML = `
+        <div class="card-title">${name.replace(/^[ti]2[ivmt]-kamui-/, '').replace(/-/g, ' ')}</div>
+        <span class="badge">${category}</span>
+        <span class="badge">${vendor}</span>
+        <div class="endpoint">${details.endpoint || '/api/...'}</div>
+        <div class="server-card-tooltip">
+          <div class="tooltip-content">
+            <div class="tooltip-desc">${escapeHtml(desc)}</div>
+            ${details.endpoint ? `<div class="tooltip-section"><strong>エンドポイント:</strong> ${details.method} ${escapeHtml(details.endpoint)}</div>` : ''}
+            ${details.params ? `<div class="tooltip-section"><strong>パラメータ:</strong><br>${escapeHtml(details.params)}</div>` : ''}
+            ${details.example ? `<div class="tooltip-section"><strong>使用例:</strong><br><code>${escapeHtml(details.example)}</code></div>` : ''}
+          </div>
+        </div>
+      `;
+      
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', () => {
+        const usage = buildUsage(category, server.url || '');
+        openJsonModal(usage, name);
+      });
+      
+      serverContainer.appendChild(card);
     });
-    serverContainer.appendChild(card);
-  });
+  } catch(err) {
+    console.error('Failed to load MCP servers:', err);
+    // フォールバック：静的データを表示
+    const fallbackServers = [
+      { category: 'creative', title: 'Text to Image', vendor: 'FAL', url: 'https://example.com/t2i/fal/imagen4/ultra' }
+    ];
+    fallbackServers.forEach(server => {
+      const { category, title, vendor, url } = server;
+      const pathOnly = url.replace(/^https?:\/\/[^\/]+/, '');
+      const card = document.createElement('div');
+      card.className = 'card pastel';
+      setCardGradient(card, title);
+      card.innerHTML = `
+        <div class="card-title">${title}</div>
+        <span class="badge">${category}</span>
+        <span class="badge">${vendor}</span>
+        <div class="endpoint">${pathOnly}</div>
+      `;
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', () => {
+        const usage = buildUsage(category, url);
+        openJsonModal(usage, title);
+      });
+      serverContainer.appendChild(card);
+    });
+  }
 }
+
+// MCPツール詳細情報マッピングを関数の外に移動（グローバルに）
+const mcpToolDetails = {
+  'file-upload-kamui-fal': {
+    endpoint: '/uploader/fal',
+    method: 'POST',
+    params: 'ファイルをmultipart/form-dataで送信',
+    example: 'curl -X POST -F "file=@image.jpg" {BASE_URL}/uploader/fal'
+  },
+  't2i-kamui-flux-schnell': {
+    endpoint: '/t2i/fal/flux/schnell',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト（高速）',
+    example: '{"prompt": "サイバーパンクな東京の夜景"}'
+  },
+  't2i-kamui-flux-krea-lora': {
+    endpoint: '/t2i/fal/flux-krea-lora',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト, lora_scale: LoRA強度',
+    example: '{"prompt": "アニメスタイルのキャラクター", "lora_scale": 0.8}'
+  },
+  't2i-kamui-dreamina-v31': {
+    endpoint: '/t2i/fal/bytedance/dreamina/v3.1/text-to-image',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト, style: スタイル指定',
+    example: '{"prompt": "油絵風の風景画", "style": "oil-painting"}'
+  },
+  't2i-kamui-imagen3': {
+    endpoint: '/t2i/google/imagen',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト（Google Imagen）',
+    example: '{"prompt": "フォトリアルな花の写真"}'
+  },
+  't2i-kamui-imagen4-fast': {
+    endpoint: '/t2i/fal/imagen4/fast',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト, size: 画像サイズ（オプション）',
+    example: '{"prompt": "富士山の美しい写真", "size": "1024x1024"}'
+  },
+  't2i-kamui-imagen4-ultra': {
+    endpoint: '/t2i/fal/imagen4/ultra',
+    method: 'POST',
+    params: 'prompt: 画像生成プロンプト（高品質）, size: 画像サイズ',
+    example: '{"prompt": "詳細な富士山の風景画", "size": "2048x2048"}'
+  },
+  't2i-kamui-ideogram-character-base': {
+    endpoint: '/t2i/fal/ideogram/character-base',
+    method: 'POST',
+    params: 'prompt: キャラクター説明, consistency_mode: 一貫性モード',
+    example: '{"prompt": "勇敢な女性戦士", "consistency_mode": true}'
+  },
+  't2v-kamui-veo3-fast': {
+    endpoint: '/t2v/fal/veo3/fast',
+    method: 'POST',
+    params: 'prompt: ビデオ生成プロンプト, duration: 長さ（秒）',
+    example: '{"prompt": "走る猫のアニメーション", "duration": 5}'
+  },
+  't2v-kamui-wan-v2-2-5b-fast': {
+    endpoint: '/t2v/fal/wan/v2.2-5b/text-to-video/fast-wan',
+    method: 'POST',
+    params: 'prompt: ビデオ生成プロンプト, fps: フレームレート',
+    example: '{"prompt": "空を飛ぶ鳥", "fps": 24}'
+  },
+  'i2i-kamui-aura-sr': {
+    endpoint: '/i2i/fal/aura-sr',
+    method: 'POST',
+    params: 'image_url: 元画像URL, scale: 拡大倍率',
+    example: '{"image_url": "https://example.com/image.jpg", "scale": 4}'
+  },
+  'i2i-kamui-flux-kontext-lora': {
+    endpoint: '/i2i/fal/flux/kontext',
+    method: 'POST',
+    params: 'image_url: 元画像URL, prompt: 編集指示',
+    example: '{"image_url": "base64://...", "prompt": "背景を夕焼けに変更"}'
+  },
+  'i2i-kamui-ideogram-character-remix': {
+    endpoint: '/i2i/fal/ideogram/character-remix',
+    method: 'POST',
+    params: 'image_url: キャラクター画像, style: 新しいスタイル',
+    example: '{"image_url": "base64://...", "style": "cyberpunk"}'
+  },
+  'i2i-kamui-qwen-image-edit': {
+    endpoint: '/i2i/fal/qwen/image-edit',
+    method: 'POST',
+    params: 'image_url: 元画像, prompt: 編集指示',
+    example: '{"image_url": "base64://...", "prompt": "人物を削除して背景のみに"}'
+  },
+  'train-kamui-flux-kontext': {
+    endpoint: '/train/fal/flux/kontext',
+    method: 'POST',
+    params: 'images: 学習画像配列, model_name: モデル名',
+    example: '{"images": ["url1", "url2"], "model_name": "my-style"}'
+  },
+  'video-analysis-kamui': {
+    endpoint: '/video-analysis/google/gemini',
+    method: 'POST',
+    params: 'video_url: ビデオURL, prompt: 分析指示',
+    example: '{"video_url": "https://example.com/video.mp4", "prompt": "このビデオの要約を作成"}'
+  }
+};
 
 // 利用方法テンプレート
 function buildUsage(category, url){
@@ -1313,105 +1468,6 @@ async function initDocMenuTable() {
       return state.backendBase;
     }
 
-    // MCPツールの詳細情報マッピング（submit情報など）
-    const mcpToolDetails = {
-      'file-upload-kamui-fal': {
-        endpoint: '/uploader/fal',
-        method: 'POST',
-        params: 'ファイルをmultipart/form-dataで送信',
-        example: 'curl -X POST -F "file=@image.jpg" {BASE_URL}/uploader/fal'
-      },
-      't2i-kamui-flux-schnell': {
-        endpoint: '/t2i/fal/flux/schnell',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト（高速）',
-        example: '{"prompt": "サイバーパンクな東京の夜景"}'
-      },
-      't2i-kamui-flux-krea-lora': {
-        endpoint: '/t2i/fal/flux-krea-lora',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト, lora_scale: LoRA強度',
-        example: '{"prompt": "アニメスタイルのキャラクター", "lora_scale": 0.8}'
-      },
-      't2i-kamui-dreamina-v31': {
-        endpoint: '/t2i/fal/bytedance/dreamina/v3.1/text-to-image',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト, style: スタイル指定',
-        example: '{"prompt": "油絵風の風景画", "style": "oil-painting"}'
-      },
-      't2i-kamui-imagen3': {
-        endpoint: '/t2i/google/imagen',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト（Google Imagen）',
-        example: '{"prompt": "フォトリアルな花の写真"}'
-      },
-      't2i-kamui-imagen4-fast': {
-        endpoint: '/t2i/fal/imagen4/fast',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト, size: 画像サイズ（オプション）',
-        example: '{"prompt": "富士山の美しい写真", "size": "1024x1024"}'
-      },
-      't2i-kamui-imagen4-ultra': {
-        endpoint: '/t2i/fal/imagen4/ultra',
-        method: 'POST',
-        params: 'prompt: 画像生成プロンプト（高品質）, size: 画像サイズ',
-        example: '{"prompt": "詳細な富士山の風景画", "size": "2048x2048"}'
-      },
-      't2i-kamui-ideogram-character-base': {
-        endpoint: '/t2i/fal/ideogram/character-base',
-        method: 'POST',
-        params: 'prompt: キャラクター説明, consistency_mode: 一貫性モード',
-        example: '{"prompt": "勇敢な女性戦士", "consistency_mode": true}'
-      },
-      't2v-kamui-veo3-fast': {
-        endpoint: '/t2v/fal/veo3/fast',
-        method: 'POST',
-        params: 'prompt: ビデオ生成プロンプト, duration: 長さ（秒）',
-        example: '{"prompt": "走る猫のアニメーション", "duration": 5}'
-      },
-      't2v-kamui-wan-v2-2-5b-fast': {
-        endpoint: '/t2v/fal/wan/v2.2-5b/text-to-video/fast-wan',
-        method: 'POST',
-        params: 'prompt: ビデオ生成プロンプト, fps: フレームレート',
-        example: '{"prompt": "空を飛ぶ鳥", "fps": 24}'
-      },
-      'i2i-kamui-aura-sr': {
-        endpoint: '/i2i/fal/aura-sr',
-        method: 'POST',
-        params: 'image_url: 元画像URL, scale: 拡大倍率',
-        example: '{"image_url": "https://example.com/image.jpg", "scale": 4}'
-      },
-      'i2i-kamui-flux-kontext-lora': {
-        endpoint: '/i2i/fal/flux/kontext',
-        method: 'POST',
-        params: 'image_url: 元画像URL, prompt: 編集指示',
-        example: '{"image_url": "base64://...", "prompt": "背景を夕焼けに変更"}'
-      },
-      'i2i-kamui-ideogram-character-remix': {
-        endpoint: '/i2i/fal/ideogram/character-remix',
-        method: 'POST',
-        params: 'image_url: キャラクター画像, style: 新しいスタイル',
-        example: '{"image_url": "base64://...", "style": "cyberpunk"}'
-      },
-      'i2i-kamui-qwen-image-edit': {
-        endpoint: '/i2i/fal/qwen/image-edit',
-        method: 'POST',
-        params: 'image_url: 元画像, prompt: 編集指示',
-        example: '{"image_url": "base64://...", "prompt": "人物を削除して背景のみに"}'
-      },
-      'train-kamui-flux-kontext': {
-        endpoint: '/train/fal/flux/kontext',
-        method: 'POST',
-        params: 'images: 学習画像配列, model_name: モデル名',
-        example: '{"images": ["url1", "url2"], "model_name": "my-style"}'
-      },
-      'video-analysis-kamui': {
-        endpoint: '/video-analysis/google/gemini',
-        method: 'POST',
-        params: 'video_url: ビデオURL, prompt: 分析指示',
-        example: '{"video_url": "https://example.com/video.mp4", "prompt": "このビデオの要約を作成"}'
-      }
-    };
 
     async function loadMCPTools(){
       // バックエンド（Node.jsサーバー）から、現在参照中のMCP定義を取得

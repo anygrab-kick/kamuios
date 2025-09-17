@@ -1083,6 +1083,92 @@ pre.code code { color: var(--text); }
 
 /* この重複したホバー定義を削除 */
 
+/* サーバーカードのツールチップ */
+.server-card {
+  overflow: visible !important;
+}
+
+.server-card-tooltip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(17,24,39,0.98);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 0.8rem;
+  color: var(--text);
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+  margin-top: 8px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  min-width: 280px;
+  max-width: 400px;
+  z-index: 10000;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+[data-theme="light"] .server-card-tooltip {
+  background: rgba(255,255,255,0.98);
+  border-color: rgba(0,0,0,0.1);
+}
+
+.server-card:hover .server-card-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ツールチップ内のコンテンツスタイル（サーバーカード用） */
+.server-card-tooltip .tooltip-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.server-card-tooltip .tooltip-desc {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+[data-theme="light"] .server-card-tooltip .tooltip-desc {
+  border-bottom-color: rgba(0,0,0,0.1);
+}
+
+.server-card-tooltip .tooltip-section {
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.server-card-tooltip .tooltip-section strong {
+  color: #4a9eff;
+  display: block;
+  margin-bottom: 2px;
+}
+[data-theme="light"] .server-card-tooltip .tooltip-section strong {
+  color: #2563eb;
+}
+
+.server-card-tooltip .tooltip-section code {
+  display: block;
+  background: rgba(0,0,0,0.3);
+  padding: 4px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+  font-family: monospace;
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+[data-theme="light"] .server-card-tooltip .tooltip-section code {
+  background: rgba(0,0,0,0.05);
+}
+
 /* モバイル対応 */
 @media (max-width: 768px) {
   .mcp-dial-container {
