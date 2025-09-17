@@ -4,61 +4,177 @@
 
 ## Setup
 
+### クイックスタート
+
+最速で起動する3ステップ：
+
+```bash
+# 1. クローンして移動
+git clone https://github.com/dai-motoki/kamuios.git && cd kamuios
+
+# 2. 環境設定
+cp env.sample .env
+# .envを編集（最低限ANTHROPIC_API_KEYとCLAUDE_MCP_CONFIG_PATHを設定）
+
+# 3. 起動（すべてのサービス + ブラウザ自動起動）
+./start_all.sh
+```
+
 ### 基本セットアップ
 
+KamuiOSは以下の機能を提供します：
+- 🎨 **Dynamic Media Gallery** - メディアファイルの動的閲覧・管理
+- 🤖 **AI エージェント機能** - Claude APIを使用した高度なAIアシスタント
+- 🌐 **3D Directory Graph** - ディレクトリ構造の3D可視化（AR/VR対応）
+- 📱 **空間コンピューティング** - AR/VR環境での操作体験
+
+#### 前提条件
+
+- Node.js 18.x 以上
+- Python 3.8 以上
+- Hugo 0.110.0 以上
+- Claude API Key（[Anthropic](https://www.anthropic.com/)から取得）
+
+#### 1. プロジェクトのクローンと環境設定
+
 ```bash
+# リポジトリをクローン
 git clone https://github.com/dai-motoki/kamuios.git
 cd kamuios
-hugo server -D -p 1313
+
+# 環境設定ファイルをコピー
+cp env.sample .env
 ```
 
-アクセス: http://localhost:1313/
+#### 2. .envファイルの設定
 
-### Dynamic Media Gallery の起動
-
-メディアギャラリー機能を使用する場合は、追加でNode.jsサーバーを起動します：
-SCAN_PATHを設定してください。SCAN_PATHはメディアファイルの置き場所です。
+`.env`ファイルを編集して必要な設定を行います：
 
 ```bash
-# 初回のみ: 環境設定（プロジェクトルートで実行）
-cp .env.sample .env
-# .envを編集してSCAN_PATHを設定（例: /Users/yourname/kamuios/static/images）
+# 必須設定
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxxx  # Claude API キー
+CLAUDE_MCP_CONFIG_PATH=/path/to/mcp-config.json  # MCP設定ファイルのパス
+SCAN_PATH=/Users/yourname/kamuios/  # メディアファイルのスキャンパス
 
-
-# 別のターミナルで実行
-cd backend
-node server.js
+# オプション設定（デフォルト値あり）
+PORT=7777  # Node.jsサーバーのポート
+PYTHON_SERVER_PORT=8888  # Python SDKサーバーのポート
 ```
 
-Media Gallery: http://localhost:1313/#dynamic-media-gallery
+#### 3. 一括起動（推奨）
+
+すべてのサービスを一度に起動します：
+
+```bash
+./start_all.sh
+```
+
+これにより以下が自動的に実行されます：
+- ✅ Node.js バックエンドサーバー（Dynamic Media Gallery用）
+- ✅ Python SDK サーバー（AIエージェント機能用）
+- ✅ Hugo 開発サーバー（メインWebインターフェース）
+- ✅ ブラウザで http://localhost:1313/ を自動で開く
+
+#### 4. アクセスURL
+
+- **メインインターフェース**: http://localhost:1313/
+- **Dynamic Media Gallery**: http://localhost:1313/#dynamic-media-gallery
+- **3D Directory Graph**: http://localhost:1313/dir-graph-ar.html
+- **Node.js API**: http://localhost:7777/
+- **Python SDK API**: http://localhost:8888/
+
+#### 5. サービスの停止
+
+```bash
+./start_all.sh stop
+# または実行中に Ctrl+C
+```
+
 
 ### トラブルシューティング
 
-ポートが使用中の場合:
-```bash
-# Hugoサーバーを停止
-pkill hugo
+#### サービスが起動しない場合
 
-# Node.jsサーバーを停止
-lsof -i :7777
-kill -9 <PID>
+```bash
+# すべてのサービスを停止してから再起動
+./start_all.sh stop
+./start_all.sh
 ```
 
-## Directory Graph 3D AR/VR
+#### ポートが使用中の場合
+
+```bash
+# 使用中のポートを確認
+lsof -i :1313  # Hugo
+lsof -i :7777  # Node.js
+lsof -i :8888  # Python SDK
+
+# プロセスを停止
+kill -9 <PID>
+
+# または個別に停止
+pkill hugo
+pkill node
+pkill python3
+```
+
+#### ログの確認
+
+```bash
+# 各サービスのログを確認
+tail -f logs/node_server.log     # Node.jsサーバー
+tail -f logs/python_server.log   # Python SDKサーバー
+tail -f logs/hugo_server.log     # Hugoサーバー
+```
+
+#### 環境変数の問題
+
+```bash
+# .envファイルが正しく読み込まれているか確認
+cat .env | grep -v '^#'
+
+# MCP設定ファイルの存在確認
+ls -la $CLAUDE_MCP_CONFIG_PATH
+```
+
+## 主な機能
+
+### Dynamic Media Gallery
+
+メディアファイルを動的に閲覧・管理できるギャラリー機能です。
+
+- 📁 指定ディレクトリ内のメディアファイルを自動スキャン
+- 🖼️ 画像・動画・音声ファイルのプレビュー表示
+- 🔍 リアルタイム検索とフィルタリング
+- 📂 Finderで直接ファイルを開く機能
+
+アクセス: http://localhost:1313/#dynamic-media-gallery
+
+### AI エージェント機能
+
+Claude APIを活用した高度なAIアシスタント機能です。
+
+- 💬 自然言語での対話型インターフェース
+- 🛠️ MCP（Model Context Protocol）によるツール統合
+- 🎨 画像生成、動画生成、音楽生成などの創作支援
+- 📝 コード生成、文書作成、データ分析
+
+円形ダイヤルインターフェースから各種AIツールにアクセスできます。
+
+### Directory Graph 3D AR/VR
 
 ディレクトリ構造を3D空間で可視化し、AR/VR体験ができる機能です。
 
-### セットアップ
+- 🌍 3次元放射状レイアウトでディレクトリを表示
+- 🎨 ファイルタイプごとの色分け表示
+- 🖼️ 画像ファイルのサムネイル表示
+- 🥽 WebXRによるAR/VR体験
 
-1. **バックエンドサーバーの起動**（プロジェクトルートで実行）
-```bash
-npm install  # 初回のみ
-npm start    # または node server.js
-```
+アクセス: http://localhost:1313/dir-graph-ar.html
 
-2. **ngrokのセットアップ**（AR/VR体験に必須）
+#### AR/VR体験のセットアップ（オプション）
 
-WebXR（AR/VR）はHTTPS接続が必要なため、ngrokを使用してローカルサーバーを公開します。
+WebXR（AR/VR）を利用する場合は、HTTPS接続が必要です。ngrokを使用してローカルサーバーを公開します：
 
 ```bash
 # ngrokのインストール（Homebrewを使用）
@@ -80,14 +196,14 @@ ngrok http 1313
 # 例: https://abc123.ngrok.app
 ```
 
-3. **アクセス方法**
+**アクセス方法**
 - Web版: http://localhost:1313/dir-graph-ar.html
 - ngrok経由（AR/VR用）: https://YOUR_NGROK_URL.ngrok.app/dir-graph-ar.html?backend=/backend
   - 例: https://abc123.ngrok.app/dir-graph-ar.html?backend=/backend
 
-### 機能説明
+#### 機能詳細
 
-#### 表示方式
+**表示方式**
 - **3次元放射状レイアウト**: ルートを中心に、各階層が球面状に広がる
 - **画像の自動表示**: 画像ファイルは実際のサムネイルとして表示
 - **色分け**: ファイルタイプごとに異なる色で表示
@@ -97,7 +213,7 @@ ngrok http 1313
   - 紫: 動画ファイル
   - その他: ファイルタイプごとに色分け
 
-#### 操作方法
+**操作方法**
 
 **Web表示**
 - マウスドラッグ: 視点の回転
@@ -193,3 +309,134 @@ KamuiOSは2つのサーバーで構成されています：
 ```
 
 **注意**: 通常は`npm start`でメインサーバーのみ起動すれば、プロキシ経由でバックエンドAPIも利用可能です。
+
+## AIエージェントタスク（右下フローティング）
+
+円形ダイヤルでMCPツールを選択し、Claude Code SDKバックエンドにプロンプトを送るUIを提供します。
+
+### 必要なサーバー
+
+- バックエンド1: メディア・ユーティリティAPI（Node.js）
+  - ファイル: `backend/server.js`
+  - 既定ポート: `7777`
+  - 用途: 画像/動画のオープン、SCAN_PATHのディレクトリを操作
+
+- バックエンド2: Claude Code SDK プロキシ（Python）
+  - ファイル: `backend/claude_sdk_server.py`
+  - 既定ポート: `8888`
+  - 用途: MCP設定を読み込み、`/chat` でClaudeに問い合わせ
+
+### 必須/推奨の環境変数
+
+`.env`（プロジェクトルート推奨）
+
+```
+# Node メディアAPI用
+PORT=7777                       # backend/server.js の公開ポート
+SCAN_PATH=/absolute/path/to/media # 画像/動画などのルート
+
+# Claude Code CLI/SDK 共通
+CLAUDE_MCP_CONFIG_PATH=/Users/<you>/kamuicode/mcp-genmedia-go/.claude/mcp-kamui-code.json
+CLAUDE_MAX_TURNS=8              # 省略可
+CLAUDE_DEBUG=1                  # 省略可（デバッグ出力）
+CLAUDE_SKIP_PERMISSIONS=1       # 省略可（CLIのみ）
+
+# Python SDK サーバー用（必要に応じて）
+PYTHON_SERVER_HOST=127.0.0.1
+PYTHON_SERVER_PORT=8888
+CLAUDE_CWD=/Users/<you>/kamuios # 省略可・作業ディレクトリ
+```
+
+Shell環境（例: `~/.zshrc`）に以下が必要な場合があります:
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...   # または CLAUDE_API_KEY
+```
+
+### 起動手順
+
+#### 方法1: 一括起動（推奨）
+
+すべてのサービスを一度に起動し、ブラウザも自動で開きます：
+
+```bash
+./start_all.sh
+```
+
+機能：
+- ✅ Node.js バックエンドサーバー（ポート 7777）
+- ✅ Python SDK サーバー（ポート 8888）
+- ✅ Hugo 開発サーバー（ポート 1313）
+- ✅ ブラウザで http://localhost:1313/ を自動で開く
+- ✅ リアルタイムでログを監視
+
+サービスの停止：
+
+```bash
+./start_all.sh stop
+# または実行中に Ctrl+C でも停止可能
+```
+
+ログファイルの場所：
+- Node.js: `logs/node_server.log`
+- Python SDK: `logs/python_server.log`
+- Hugo: `logs/hugo_server.log`
+
+#### 方法2: 個別起動
+
+1) Node メディアAPI
+
+```bash
+cd backend
+node server.js     # PORT と SCAN_PATH を .env で設定
+```
+
+2) Claude SDK Python サーバー
+
+```bash
+cd backend
+# 環境変数を読み込んで起動
+export $(cat ../.env | grep -v '^#' | xargs)
+python3 claude_sdk_server.py
+# → http://127.0.0.1:8888/health が ok になれば準備完了
+```
+
+**注意**: Python SDKサーバーは`.env`ファイルを自動で読み込みません。必ず環境変数を設定してから起動してください。
+
+3) Hugo を起動
+
+```bash
+hugo server -D -p 1313
+```
+
+4) ブラウザでアクセス
+
+`http://localhost:1313/` を開き、右下のロボットボタンを押すか、タスク入力欄で `/` を入力すると円形ダイヤルが開きます。
+
+### 既定URLの上書き（任意）
+
+クエリで上書きできます：
+
+- `?backend=http://127.0.0.1:7777` … Node API ベースURL
+- `?claude=http://127.0.0.1:8888` … Claude SDK サーバー ベースURL
+
+または、グローバル変数で定義：
+
+```html
+<script>
+  window.KAMUI_BACKEND_BASE = 'http://127.0.0.1:7777';
+  window.KAMUI_CLAUDE_BASE = 'http://127.0.0.1:8888';
+</script>
+```
+
+### トラブルシューティング（AIエージェント）
+
+- 円形ダイヤルにツールが出ない: 
+  - `CLAUDE_MCP_CONFIG_PATH` が`.env`ファイルに設定されているか確認
+  - 指定されたパスにMCP設定ファイルが存在するか確認
+  - `curl http://localhost:8888/mcp` で設定が読み込まれているか確認
+- 送信が失敗する: 
+  - `ANTHROPIC_API_KEY`（または `CLAUDE_API_KEY`）が有効か確認
+  - Pythonサーバーが環境変数を正しく読み込んでいるか確認（起動スクリプトを使用）
+  - `/chat` のHTTPステータスを確認
+- Finder/エクスプローラが開かない: `SCAN_PATH` が正しい絶対パスか、OSの種類に合った `open/start/xdg-open` が呼べるか確認

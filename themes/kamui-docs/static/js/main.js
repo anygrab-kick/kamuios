@@ -1123,37 +1123,50 @@ async function initDocMenuTable() {
   }
 }
 
-// 右下フローティング AIエージェント タスクボード（フロントのみ・ローカルストレージ永続化）
-function initTaskBoard(){
-  try {
-    // 二重初期化ガード（同一ページで複数回読み込まれても1回だけ）
-    if (window.__aiTaskBoardInit) return;
-    window.__aiTaskBoardInit = true;
-    if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
+  // 右下フローティング AIエージェント タスクボード（フロントのみ・ローカルストレージ永続化）
+  function initTaskBoard(){
+    try {
+      if (window.__aiTaskBoardInit) return;
+      window.__aiTaskBoardInit = true;
+      if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
-    const STORAGE_KEY = 'kamui_task_board_v1';
-    const state = { open: false, tasks: [] };
+      const STORAGE_KEY = 'kamui_task_board_v1';
+      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: '/backend', claudeBase: 'http://127.0.0.1:8888', mcpTools: [] };
+    const params = new URLSearchParams(location.search);
+    const queryBackend = params.get('backend');
+    const queryClaude = params.get('claude');
+    if (typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) state.backendBase = window.KAMUI_BACKEND_BASE;
+    else if (queryBackend) state.backendBase = queryBackend;
+    if (typeof window.KAMUI_CLAUDE_BASE === 'string' && window.KAMUI_CLAUDE_BASE) state.claudeBase = window.KAMUI_CLAUDE_BASE;
+    else if (queryClaude) state.claudeBase = queryClaude;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
         if (saved && typeof saved === 'object') {
-          if (Array.isArray(saved.tasks)) state.tasks = saved.tasks;
           if (typeof saved.open === 'boolean') state.open = saved.open;
         }
       }
     } catch(_) {}
-
-    function save(){
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(_) {}
-    }
+    function saveOpen(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open: state.open })); } catch(_) {} }
 
     // 要素生成
     const toggleBtn = document.createElement('button');
     toggleBtn.className = 'taskboard-toggle';
     toggleBtn.setAttribute('aria-label', 'AIエージェント タスクを開く');
     toggleBtn.setAttribute('title', 'AIエージェント タスク');
-    toggleBtn.innerHTML = '🤖';
+    // SVGイルカアイコン（淡い水色）
+    toggleBtn.innerHTML = `
+      <svg class="bot-icon" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="dolphinGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#bfe7ff"/>
+            <stop offset="100%" stop-color="#88d1ff"/>
+          </linearGradient>
+        </defs>
+        <path d="M12 3c3.1 0 5.4 1 7 3c.9 1.1 1.3 2.3 1.4 3c-1.2-.4-2.7-.8-4.3-.8c-2.4 0-4.6.8-6.3 2.2c-1 .8-1.9 1.7-2.5 2.7c-.3.5-.9.6-1.4.5c-.9-.2-1.8-.7-2.7-1.3c.4 1.4 1.1 2.4 2.1 3.2c-.5.7-.8 1.4-.9 2.1c1-.1 2.2-.5 3.3-1.1c1.2 1.5 3.2 2.4 5.4 2.4c3.9 0 7-2.6 8.1-5.8c1.2-.2 2.2-.1 3 .1c-.8-1.8-2.4-3.4-4.9-4.6C18.1 4.6 15.6 3 12 3z" fill="url(#dolphinGrad)" opacity="0.95"/>
+        <circle cx="16" cy="8.8" r="0.7" fill="#1d4ed8"/>
+      </svg>`;
 
     const panel = document.createElement('div');
     panel.id = 'aiTaskBoard';
@@ -1171,7 +1184,9 @@ function initTaskBoard(){
       </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
-        <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (Enterで追加)" autocomplete="off" />
+        <div style="position:relative;flex:1;">
+          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (Enterで追加)" autocomplete="off" />
+        </div>
         <button type="button" id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
       </div>
     `;
@@ -1183,25 +1198,508 @@ function initTaskBoard(){
     const inputEl = panel.querySelector('#taskboardInput');
     const sendEl  = panel.querySelector('#taskboardSend');
     const hideEl  = panel.querySelector('.tb-hide');
+    // Create a global dial overlay for MCP tools
+    let dialOverlay = document.getElementById('mcpDialOverlay');
+    if (!dialOverlay) {
+      dialOverlay = document.createElement('div');
+      dialOverlay.id = 'mcpDialOverlay';
+      dialOverlay.className = 'mcp-dial-overlay';
+      
+      const dialContainer = document.createElement('div');
+      dialContainer.className = 'mcp-dial-container';
+      
+      // 3D回転ラッパー
+      const itemsWrapper = document.createElement('div');
+      itemsWrapper.className = 'mcp-dial-items-wrapper';
+      dialContainer.appendChild(itemsWrapper);
+      
+      // 3D軌道エフェクト（オプション）
+      const orbit3D = document.createElement('div');
+      orbit3D.className = 'mcp-dial-orbit-3d';
+      itemsWrapper.appendChild(orbit3D);
+      
+      // 中央の入力エリア
+      const center = document.createElement('div');
+      center.className = 'mcp-dial-center';
+      center.innerHTML = `
+        <input type="text" class="mcp-dial-input" id="mcpDialInput" placeholder="ツールを検索..." autocomplete="off" />
+        <div class="mcp-dial-hint">クリックまたはEnterで選択</div>
+      `;
+      dialContainer.appendChild(center);
+      
+      // ツールアイテムコンテナ
+      const itemsContainer = document.createElement('div');
+      itemsContainer.id = 'mcpDialItems';
+      itemsContainer.className = 'mcp-dial-items';
+      itemsWrapper.appendChild(itemsContainer);
+      
+      // 閉じるボタン
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'mcp-dial-close';
+      closeBtn.innerHTML = '×';
+      closeBtn.setAttribute('aria-label', '閉じる');
+      
+      dialOverlay.appendChild(dialContainer);
+      dialOverlay.appendChild(closeBtn);
+      document.body.appendChild(dialOverlay);
+      
+      // イベントリスナー
+      closeBtn.addEventListener('click', () => {
+        dialOverlay.classList.remove('active');
+        if (inputEl) inputEl.focus();
+      });
+      
+      dialOverlay.addEventListener('click', (e) => {
+        if (e.target === dialOverlay) {
+          dialOverlay.classList.remove('active');
+          if (inputEl) inputEl.focus();
+        }
+      });
+      
+      // ダイヤル内の入力欄のイベント
+      const dialInput = center.querySelector('#mcpDialInput');
+      dialInput?.addEventListener('input', (e) => {
+        const value = e.target.value;
+        updateDialItems(value);
+      });
+      
+      let dialActiveIndex = 0;
+      dialInput?.addEventListener('keydown', (e) => {
+        const items = Array.from(dialOverlay.querySelectorAll('.mcp-dial-item'));
+        
+        if (e.key === 'Escape') {
+          dialOverlay.classList.remove('active');
+          if (inputEl) inputEl.focus();
+        } else if (e.key === 'Enter') {
+          const activeItem = dialOverlay.querySelector('.mcp-dial-item.active');
+          if (activeItem) {
+            activeItem.click();
+          }
+        } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (items.length > 0) {
+            dialActiveIndex = (dialActiveIndex + 1) % items.length;
+            items.forEach((item, i) => {
+              item.classList.toggle('active', i === dialActiveIndex);
+            });
+          }
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (items.length > 0) {
+            dialActiveIndex = (dialActiveIndex - 1 + items.length) % items.length;
+            items.forEach((item, i) => {
+              item.classList.toggle('active', i === dialActiveIndex);
+            });
+          }
+        }
+      });
+    }
+
+    async function probeBackendBase(){
+      const candidates = [];
+      const add = (s) => { if (s && !candidates.includes(s)) candidates.push(s); };
+      // 優先: 明示指定
+      add(state.backendBase);
+      // 典型候補
+      add('/backend');
+      add('http://localhost:3001/backend');
+      add('http://127.0.0.1:3001/backend');
+      add('http://localhost:7777');
+      add('http://127.0.0.1:7777');
+      for (const base of candidates) {
+        try {
+          const url = base.replace(/\/$/, '') + '/api/config';
+          const res = await fetch(url, { cache: 'no-cache', mode: 'cors' });
+          if (res.ok) { state.backendBase = base; return base; }
+        } catch(_) {}
+      }
+      return state.backendBase;
+    }
+
+    async function probeClaudeBase(){
+      const candidates = [];
+      const add = (s) => { if (s && !candidates.includes(s)) candidates.push(s); };
+      add(state.claudeBase);
+      add('http://127.0.0.1:8888');
+      add('http://localhost:8888');
+      for (const base of candidates) {
+        try {
+          const res = await fetch(base.replace(/\/$/, '') + '/health', { cache: 'no-cache' });
+          if (res.ok) { state.claudeBase = base; return base; }
+        } catch(_) {}
+      }
+      return state.claudeBase;
+    }
+    
+    async function loadMCPTools(){
+      // バックエンド（Python SDKサーバー）から、現在参照中のMCP定義を取得
+      try {
+        // まずClaude SDKサーバーのベースURLを推測
+        const claudeBase = await probeClaudeBase();
+        const res = await fetch(`${claudeBase.replace(/\/$/, '')}/mcp/servers`, { cache: 'no-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const servers = Array.isArray(data.servers) ? data.servers : [];
+        // ツール配列に正規化（name/description）
+        state.mcpTools = servers.map((s, idx) => ({
+          name: String(s.name || `tool-${idx+1}`),
+          description: String(s.description || s.url || ''),
+          icon: guessIconFromName(String(s.name || '')),
+          color: guessColorFromName(String(s.name || ''))
+        }));
+      } catch(err) {
+        console.warn('Failed to load MCP tools from backend:', err);
+        state.mcpTools = [];
+      }
+    }
+
+    function guessIconFromName(name){
+      const n = name.toLowerCase();
+      if (n.startsWith('t2i') || n.includes('image')) return 'IMG';
+      if (n.startsWith('t2m') || n.includes('music')) return 'MUS';
+      if (n.startsWith('t2v') || n.includes('video')) return 'VID';
+      if (n.includes('visual') || n.includes('diagram')) return 'VIS';
+      if (n.includes('search') || n.includes('crawl')) return 'WEB';
+      if (n.includes('editor')) return 'EDT';
+      return 'APP';
+    }
+    
+    // カテゴリごとの色定義
+    function getCategoryColors(cat) {
+      const colors = {
+        IMG: { bg: '#FF6B6B', icon: 'https://cdn-icons-png.flaticon.com/512/3342/3342137.png' }, // 赤系 - 画像
+        VID: { bg: '#4ECDC4', icon: 'https://cdn-icons-png.flaticon.com/512/3179/3179068.png' }, // ターコイズ - 動画
+        MUS: { bg: '#95E1D3', icon: 'https://cdn-icons-png.flaticon.com/512/3141/3141766.png' }, // ミント - 音楽
+        VIS: { bg: '#A8E6CF', icon: 'https://cdn-icons-png.flaticon.com/512/2329/2329087.png' }, // ライトグリーン - ビジュアル
+        WEB: { bg: '#5B9FFF', icon: 'https://cdn-icons-png.flaticon.com/512/2991/2991114.png' }, // ブルー - ウェブ
+        EDT: { bg: '#C7A8FF', icon: 'https://cdn-icons-png.flaticon.com/512/2920/2920242.png' }, // パープル - エディタ
+        APP: { bg: '#FFD93D', icon: 'https://cdn-icons-png.flaticon.com/512/3573/3573187.png' }  // イエロー - アプリ
+      };
+      return colors[cat] || colors.APP;
+    }
+
+    function svgForCategory(cat, color){
+      const c = color || '#4a9eff';
+      const common = (child) => `<svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true" preserveAspectRatio="xMidYMid meet"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${c}" stop-opacity=".95"/><stop offset="100%" stop-color="${c}" stop-opacity=".75"/></linearGradient></defs>${child}</svg>`;
+      switch (cat) {
+        case 'IMG':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><path d="M10 26l7-7 6 6 5-5 6 6v6H10z" fill="#fff" opacity=".9"/>`);
+        case 'VID':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><polygon points="16,16 28,20 16,24" fill="#fff" opacity=".9"/>`);
+        case 'MUS':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><path d="M22 14v10a3 3 0 1 1-2-2.8V16l8-2v6a3 3 0 1 1-2-2.8V12l-6 2z" fill="#fff" opacity=".9"/>`);
+        case 'VIS':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><circle cx="20" cy="20" r="6" fill="none" stroke="#fff" stroke-width="2"/><path d="M8 20c3-5 7-8 12-8s9 3 12 8c-3 5-7 8-12 8s-9-3-12-8z" fill="none" stroke="#fff" stroke-width="2" opacity=".9"/>`);
+        case 'WEB':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><circle cx="20" cy="20" r="8" fill="none" stroke="#fff" stroke-width="2"/><path d="M12 20h16M20 12c4 4 4 12 0 16c-4-4-4-12 0-16z" stroke="#fff" stroke-width="2" fill="none"/>`);
+        case 'EDT':
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><path d="M14 26l12-12 2 2-12 12H14v-2z" fill="#fff" opacity=".9"/><path d="M24 12l2 2" stroke="#fff" stroke-width="2"/>`);
+        default:
+          return common(`<rect x="6" y="8" width="28" height="24" rx="6" fill="url(#g)"/><path d="M14 16h12v12H14z" fill="#fff" opacity=".9"/>`);
+      }
+    }
+
+    function guessColorFromName(name){
+      const palette = ['#4A90E2','#7ED321','#F5A623','#BD10E0','#50E3C2','#B8E986','#F8E71C','#D0021B','#9013FE','#417505'];
+      let hash = 0; for (let i=0;i<name.length;i++){ hash = (hash*31 + name.charCodeAt(i))>>>0; }
+      return palette[hash % palette.length];
+    }
+    
+    // 円形ダイヤルにツールを配置する関数
+    function updateDialItems(searchQuery = ''){
+      const itemsContainer = document.getElementById('mcpDialItems');
+      if (!itemsContainer || !dialOverlay) return;
+      
+      const q = searchQuery.toLowerCase();
+      const filtered = q === '' ? state.mcpTools : state.mcpTools.filter(tool => 
+        tool.name.toLowerCase().includes(q) || 
+        (tool.description && tool.description.toLowerCase().includes(q))
+      );
+      
+      // 既存のアイテムをクリア
+      itemsContainer.innerHTML = '';
+      
+      if (filtered.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-weak);';
+        empty.textContent = 'ツールが見つかりません';
+        itemsContainer.appendChild(empty);
+        return;
+      }
+      
+      // 円周上の配置を計算（レスポンシブ対応）
+      const containerSize = window.innerWidth < 768 ? 600 : 900;
+      const itemCount = filtered.length;
+      
+      // ツール数に応じて半径とアイテムサイズを動的に調整
+      let radius, itemSize, sizeClass;
+      if (itemCount <= 6) {
+        radius = window.innerWidth < 768 ? 200 : 300;
+        itemSize = window.innerWidth < 768 ? 120 : 150;
+        sizeClass = '';
+      } else if (itemCount <= 12) {
+        radius = window.innerWidth < 768 ? 220 : 330;
+        itemSize = window.innerWidth < 768 ? 110 : 140;
+        sizeClass = 'size-medium';
+      } else if (itemCount <= 20) {
+        radius = window.innerWidth < 768 ? 240 : 360;
+        itemSize = window.innerWidth < 768 ? 100 : 130;
+        sizeClass = 'size-small';
+      } else {
+        // 20個以上の場合は2重円にする
+        radius = window.innerWidth < 768 ? 230 : 350;
+        itemSize = window.innerWidth < 768 ? 100 : 120;
+        sizeClass = 'size-small';
+      }
+      
+      const centerX = containerSize / 2; // コンテナの中心X
+      const centerY = containerSize / 2; // コンテナの中心Y
+      const angleStep = (2 * Math.PI) / Math.min(itemCount, 20); // 最大20個まで外円に配置
+      const startAngle = -Math.PI / 2; // 上から開始
+      
+      filtered.forEach((tool, index) => {
+        let angle, x, y, currentRadius;
+        
+        // 20個以上の場合は内側の円にも配置
+        if (itemCount > 20 && index >= 20) {
+          const innerIndex = index - 20;
+          const innerCount = itemCount - 20;
+          const innerAngleStep = (2 * Math.PI) / innerCount;
+          currentRadius = radius * 0.6; // 内側の円は60%の半径
+          angle = startAngle + innerAngleStep * innerIndex;
+        } else {
+          angle = startAngle + angleStep * index;
+          currentRadius = radius;
+        }
+        
+        // 円形配置の座標計算
+        x = centerX + currentRadius * Math.cos(angle);
+        y = centerY + currentRadius * Math.sin(angle);
+        
+        const item = document.createElement('div');
+        const isInnerCircle = itemCount > 20 && index >= 20;
+        const classes = ['mcp-dial-item', sizeClass];
+        if (isInnerCircle) classes.push('inner-circle');
+        item.className = classes.filter(Boolean).join(' ');
+        item.style.width = `${itemSize}px`;
+        item.style.height = `${itemSize}px`;
+        item.style.left = `${x}px`;
+        item.style.top = `${y}px`;
+        
+        // アニメーションを遅延
+        item.style.animationDelay = `${index * 0.05}s`;
+        item.setAttribute('data-tool', tool.name);
+        
+        // 3D配置のための角度を保存（CSSで使用）
+        const angleDeg = (angle * 180 / Math.PI);
+        item.setAttribute('data-angle', angleDeg);
+        item.style.setProperty('--rotation', `${angleDeg}deg`);
+        
+        const iconCat = guessIconFromName(tool.name);
+        const categoryInfo = getCategoryColors(iconCat);
+        item.innerHTML = `
+          <div class="mcp-dial-item-inner">
+            <div class="mcp-dial-icon" style="background: ${categoryInfo.bg};">
+              <img src="${categoryInfo.icon}" style="width: 80%; height: 80%; object-fit: contain; filter: brightness(0) invert(1);" />
+            </div>
+            <div class="mcp-dial-label">${escapeHtml(tool.name)}</div>
+            ${tool.description ? `<div class="mcp-dial-tooltip">${escapeHtml(tool.description)}</div>` : ''}
+          </div>
+        `;
+        
+        // クリックイベント
+        item.addEventListener('click', () => {
+          item.classList.add('selected');
+          setTimeout(() => {
+            if (inputEl) {
+              inputEl.value = `${tool.description || tool.name}して`;
+              inputEl.focus();
+            }
+            dialOverlay.classList.remove('active');
+          }, 300);
+        });
+        
+        // ホバー効果
+        item.addEventListener('mouseenter', () => {
+          // 他のアクティブ状態をクリア
+          itemsContainer.querySelectorAll('.mcp-dial-item').forEach(el => {
+            el.classList.remove('active');
+          });
+          item.classList.add('active');
+        });
+        
+        itemsContainer.appendChild(item);
+      });
+      
+      // 最初のアイテムをアクティブに
+      const firstItem = itemsContainer.querySelector('.mcp-dial-item');
+      if (firstItem) firstItem.classList.add('active');
+    }
+    
+    // 円形ダイヤルを表示する関数
+    function showMCPDial(){
+      if (!dialOverlay) return;
+      dialOverlay.classList.add('active');
+      const dialInput = document.getElementById('mcpDialInput');
+      if (dialInput) {
+        dialInput.value = '';
+        setTimeout(() => dialInput.focus(), 100);
+      }
+      updateDialItems('');
+    }
+
+    function cssStatus(s){
+      if (s === 'running') return 'doing';
+      if (s === 'completed') return 'done';
+      if (s === 'failed') return 'done';
+      return 'todo';
+    }
+    function iconFor(s){
+      if (s === 'running') return '⏳';
+      if (s === 'completed') return '✔';
+      if (s === 'failed') return '×';
+      return '';
+    }
+    function mergeTask(task){
+      const id = String(task.id);
+      const idx = state.tasks.findIndex(x => String(x.id) === id);
+      if (idx >= 0) state.tasks[idx] = task; else state.tasks.unshift(task);
+      state.tasks.sort((a,b)=>new Date(b.createdAt||0) - new Date(a.createdAt||0));
+    }
+    async function submitRemoteTask(text){
+      const prompt = String(text||'').trim();
+      if (!prompt) return;
+      const now = new Date().toISOString();
+      const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const task = { id: tempId, status: 'running', prompt, createdAt: now, updatedAt: now, response: '', result: null, error: null };
+      mergeTask(task);
+      render();
+      try {
+        const base = await probeClaudeBase();
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分のタイムアウト
+        
+        const res = await fetch(`${base.replace(/\/$/, '')}/chat`, { 
+          method: 'POST', 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify({ prompt }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!res.ok) throw new Error(`submit failed (${res.status})`);
+        const data = await res.json();
+        task.status = 'completed';
+        task.response = data && typeof data.response === 'string' ? data.response : '';
+        task.result = data && data.result ? data.result : null;
+        task.updatedAt = new Date().toISOString();
+      } catch(err) {
+        task.status = 'failed';
+        if (err.name === 'AbortError') {
+          task.error = 'タイムアウト: 処理に時間がかかりすぎました（5分以上）';
+        } else {
+          task.error = String(err && err.message || err);
+        }
+        task.updatedAt = new Date().toISOString();
+      }
+      mergeTask(task);
+      render();
+    }
 
     function render(){
       if (!listEl) return;
-      if (!Array.isArray(state.tasks)) state.tasks = [];
-      if (state.tasks.length === 0){
+      if (!Array.isArray(state.tasks) || state.tasks.length === 0){
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
         return;
       }
       const html = state.tasks.map(t => {
-        const status = t.status || 'todo';
-        const isDone = status === 'done';
-        const isDoing = status === 'doing';
-        const icon = isDone ? '✔' : (isDoing ? '●' : '');
+        const s = t.status || 'running';
+        const cls = cssStatus(s);
+        const icon = iconFor(s);
+        const title = escapeHtml(t.prompt || '');
+        const responseText = String(t.response || '');
+        const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
+        const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
+        const items = [];
+        
+        // URL検出
+        for (const match of urlMatches) {
+          const url = match[0].replace(/[.,;]+$/, '');
+          if (!items.some(item => item.includes(encodeURIComponent(url)))) {
+            items.push(`<span class="tb-meta-item" data-action="open-url" title="リンクを開く" data-url="${encodeURIComponent(url)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(74,158,255,0.1);transition:background 0.2s;">
+              <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#4a9eff;"><path fill="currentColor" d="M10 3H3v7h2V6.41l9.29 9.3l1.42-1.42l-9.3-9.29H10V3Zm4 0v2h3.59l-9.3 9.29l1.42 1.42l9.29-9.3V13h2V3h-7ZM5 14v7h7v-2H7v-5H5Zm12 5h-3v2h7v-7h-2v5Z"/></svg>
+            </span>`);
+          }
+        }
+        
+        // パス検出（ファイルとフォルダを判別）
+        const addedPaths = new Set();
+        const addedDirs = new Set();
+        
+        for (const match of pathMatches) {
+          const path = match[0].replace(/[.,;]+$/, '');
+          
+          if (!addedPaths.has(path)) {
+            addedPaths.add(path);
+            
+            // ファイルとして扱う（デフォルト）
+            items.push(`<span class="tb-meta-item" data-action="open-file" title="ファイルを開く" data-path="${encodeURIComponent(path)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(74,158,255,0.1);transition:background 0.2s;">
+              <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#4a9eff;"><path fill="currentColor" d="M6 2a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8l-6-6H6Zm7 1.5L18.5 9H13V3.5ZM8 13h8v2H8v-2Zm0 4h8v2H8v-2Z"/></svg>
+            </span>`);
+            
+            // ファイルパスからディレクトリパスを抽出してフォルダアイコンも追加
+            const lastSlash = path.lastIndexOf('/');
+            if (lastSlash > 0) {
+              const dirPath = path.substring(0, lastSlash);
+              if (!addedDirs.has(dirPath)) {
+                addedDirs.add(dirPath);
+                items.push(`<span class="tb-meta-item" data-action="open-folder" title="フォルダを開く" data-path="${encodeURIComponent(dirPath)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(74,158,255,0.1);transition:background 0.2s;">
+                  <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#4a9eff;"><path fill="currentColor" d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2Z"/></svg>
+                </span>`);
+              }
+            }
+          }
+        }
+        
+        const createdAt = t.createdAt ? new Date(t.createdAt).getTime() : Date.now();
+        const elapsed = Date.now() - createdAt;
+        const progressPct = Math.max(0, Math.min(100, Math.round((elapsed / 300000) * 100)));
+        const showProgress = s === 'running';
+        
+        // 経過時間に応じてステータステキストを変更
+        let statusText = '';
+        if (showProgress) {
+          if (elapsed < 60000) {
+            statusText = 'プロンプトを強化しています...';
+          } else if (elapsed < 180000) {
+            statusText = '生成中です...';
+          } else {
+            statusText = '処理に時間がかかっています...';
+          }
+        } else if (!items.length) {
+          statusText = t.error ? String(t.error) : s;
+        }
+        
         return `
-          <div class="task-item ${status}" data-id="${String(t.id)}">
-            <button class="task-status ${status}" data-action="cycle" title="状態を切替">
+          <div class="task-item ${cls}" data-id="${String(t.id)}">
+            <button class="task-status ${cls}" data-action="open" title="詳細を表示">
               <span class="i">${icon}</span>
             </button>
-            <div class="task-text">${escapeHtml(t.text||'')}</div>
+            <div class="task-text">
+              <div>${title}</div>
+              <div class="tb-meta" style="font-size:.75rem;color:var(--text-weak);margin-top:3px;">
+                ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
+                ${items.join('')}
+              </div>
+              ${showProgress ? `
+                <div class="tb-progress" style="margin-top:6px;height:6px;border-radius:999px;background:rgba(255,255,255,0.1);overflow:hidden;position:relative;">
+                  <div class="tb-progress-bar" style="height:100%;width:${progressPct}%;background:linear-gradient(90deg,#4a9eff,#00d4ff);transition:width 0.5s ease;position:relative;overflow:hidden;">
+                    <div class="tb-progress-shine" style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent);animation:shine 1.5s infinite;"></div>
+                  </div>
+                </div>
+              ` : ''}
+            </div>
           </div>
         `;
       }).join('');
@@ -1213,53 +1711,152 @@ function initTaskBoard(){
       panel.classList.toggle('open', state.open);
       panel.setAttribute('aria-hidden', state.open ? 'false' : 'true');
       toggleBtn.setAttribute('aria-pressed', state.open ? 'true' : 'false');
-      save();
-    }
-
-    function nextStatus(s){
-      return s === 'todo' ? 'doing' : (s === 'doing' ? 'done' : 'todo');
-    }
-
-    function addTask(text){
-      const trimmed = String(text||'').trim();
-      if (!trimmed) return;
-      const task = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,6), text: trimmed, status: 'todo' };
-      state.tasks.unshift(task);
-      save();
-      render();
+      saveOpen();
     }
 
     toggleBtn.addEventListener('click', () => setOpen(!state.open));
     hideEl?.addEventListener('click', () => setOpen(false));
-    sendEl?.addEventListener('click', () => { addTask(inputEl?.value); if (inputEl) inputEl.value=''; });
+    sendEl?.addEventListener('click', () => { const v = inputEl?.value; if (inputEl) inputEl.value=''; submitRemoteTask(v); });
+    
     inputEl?.addEventListener('keydown', (e) => {
-      // 日本語IME確定 Enter の重複発火回避 + 既定動作抑止
       if (e.isComposing || e.keyCode === 229) return;
+      
       if (e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        addTask(inputEl.value);
-        inputEl.value='';
+        e.preventDefault(); e.stopPropagation();
+        const v = inputEl.value; inputEl.value = '';
+        submitRemoteTask(v);
       }
     });
-    listEl?.addEventListener('click', (e) => {
-      const btn = e.target.closest('.task-status');
-      if (!btn) return;
-      const item = btn.closest('.task-item');
-      const id = item?.getAttribute('data-id');
+    inputEl?.addEventListener('input', (e) => {
+      const value = e.target.value;
+      if (value === '/') {
+        // スラッシュのみの場合、円形ダイヤルを表示
+        showMCPDial();
+        e.target.value = ''; // スラッシュを消す
+      }
+    });
+    // クリック外でダイヤルを非表示
+    document.addEventListener('click', (e) => {
+      if (!panel.contains(e.target) && dialOverlay && !dialOverlay.contains(e.target)) {
+        dialOverlay.classList.remove('active');
+      }
+    });
+    listEl?.addEventListener('click', async (e) => {
+      const any = e.target.closest('.task-item');
+      if (!any) return; const id = any.getAttribute('data-id');
       if (!id) return;
-      const idx = state.tasks.findIndex(x => String(x.id) === id);
-      if (idx === -1) return;
-      const cur = state.tasks[idx].status || 'todo';
-      state.tasks[idx].status = nextStatus(cur);
-      save();
-      render();
+      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"]');
+      try {
+        if (actionEl) {
+          const action = actionEl.getAttribute('data-action');
+          if (action === 'open-url') {
+            const encodedUrl = actionEl.getAttribute('data-url');
+            const url = encodedUrl ? decodeURIComponent(encodedUrl) : null;
+            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+            return;
+          }
+          if (action === 'open-file') {
+            const encodedPath = actionEl.getAttribute('data-path');
+            const filePath = encodedPath ? decodeURIComponent(encodedPath) : null;
+            if (filePath) {
+              // 直接ファイルパスを開く（絶対パスの場合）
+              if (filePath.startsWith('/')) {
+                try {
+                  const base = await probeBackendBase();
+                  const res = await fetch(`${base.replace(/\/$/, '')}/api/open-file-absolute`, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ path: filePath }) 
+                  });
+                  if (!res.ok) {
+                    console.error('Failed to open file:', await res.text());
+                  }
+                } catch(err) {
+                  console.error('Failed to open file:', err);
+                  // フォールバック: ブラウザで開く
+                  window.open(`file://${filePath}`, '_blank');
+                }
+              } else {
+                // 相対パスの場合は従来通り
+                const base = await probeBackendBase();
+                fetch(`${base.replace(/\/$/, '')}/api/open-file`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: filePath }) }).catch(() => {});
+              }
+            }
+            return;
+          }
+          if (action === 'open-folder') {
+            const encodedPath = actionEl.getAttribute('data-path');
+            const folderPath = encodedPath ? decodeURIComponent(encodedPath) : null;
+            if (folderPath) {
+              // フォルダを開く（絶対パスの場合）
+              if (folderPath.startsWith('/')) {
+                try {
+                  const base = await probeBackendBase();
+                  const res = await fetch(`${base.replace(/\/$/, '')}/api/open-folder-absolute`, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ path: folderPath }) 
+                  });
+                  if (!res.ok) {
+                    console.error('Failed to open folder:', await res.text());
+                  }
+                } catch(err) {
+                  console.error('Failed to open folder:', err);
+                }
+              } else {
+                // 相対パスの場合
+                const base = await probeBackendBase();
+                fetch(`${base.replace(/\/$/, '')}/api/open-folder`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: folderPath }) }).catch(() => {});
+              }
+            }
+            return;
+          }
+        }
+        const task = state.tasks.find(t => String(t.id) === String(id));
+        if (!task) throw new Error('task not found');
+        
+        // AIチャット履歴を含む完全な情報
+        const fullData = {
+          id: task.id,
+          status: task.status,
+          prompt: task.prompt,
+          response: task.response,
+          result: task.result,
+          error: task.error,
+          createdAt: task.createdAt,
+          updatedAt: task.updatedAt,
+          // 詳細な実行結果情報
+          executionDetails: task.result ? {
+            turns: task.result.num_turns || task.result.numTurns,
+            duration_ms: task.result.duration_ms || task.result.durationMs,
+            cost_usd: task.result.total_cost_usd,
+            usage: task.result.usage,
+            session_id: task.result.session_id,
+            is_error: task.result.is_error
+          } : null,
+          // AIからの最終的な回答
+          aiResult: task.result && task.result.result ? task.result.result : null
+        };
+        
+        openJsonModal(JSON.stringify(fullData, null, 2), `Task #${id} - 詳細`);
+      } catch(err) {
+        openJsonModal(JSON.stringify({ error: '結果の取得に失敗しました', id, detail: String(err && err.message || err) }, null, 2), 'Result Error');
+      }
     });
 
-    // 初期描画
+    // 初期描画と監視開始
     render();
-    // パネル表示状態
     setOpen(!!state.open);
+    loadMCPTools(); // MCPツールを読み込む
+    
+    // デバッグ：ツールが読み込まれたか確認
+    setTimeout(() => {
+      console.log('MCP tools state:', state.mcpTools);
+    }, 100);
+    
+    setInterval(() => {
+      if (state.tasks.some(t => t.status === 'running')) render();
+    }, 500);
   } catch(err) {
     console.error('TaskBoard init failed', err);
   }
