@@ -116,8 +116,8 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         throw new Error('MCP configuration path is required. Set CLAUDE_MCP_CONFIG_PATH environment variable.');
     }
     
-    // CLIコマンドの構築（--printオプションと正しい順序で）
-    const args = ['--print'];
+    // CLIコマンドの構築
+    const args = [];
 
     if (process.env.CLAUDE_SKIP_PERMISSIONS === '1' || process.env.CLAUDE_SKIP_PERMISSIONS === 'true') {
         args.push('--dangerously-skip-permissions');
@@ -153,15 +153,11 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         });
     }
     
-    // Commander in Claude CLI treats --mcp-config as variadic. Insert "--" to
-    // terminate option parsing so the prompt is not consumed as another config path.
-    if (prompt !== undefined && prompt !== null) {
-        args.push('--');
-        args.push(String(prompt));
-    }
+    // プロンプトは標準入力経由で送るため、コマンドライン引数には含めない
     
     const cmd = `claude ${args.join(' ')}`;
     console.log(`[TASK ${id}] Starting: ${cmd}`);
+    console.log(`[TASK ${id}] Prompt: ${prompt}`);
     
     // 直接 claude コマンドを実行（bash経由を避ける）
     const child = spawn('claude', args, {
@@ -169,6 +165,12 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         cwd: cwd && typeof cwd === 'string' ? cwd : process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe']
     });
+    
+    // プロンプトを標準入力に書き込む
+    if (prompt) {
+        child.stdin.write(prompt);
+        child.stdin.end();
+    }
     
     const nowIso = new Date().toISOString();
     const task = {

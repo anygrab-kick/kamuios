@@ -87,13 +87,27 @@ stop_all
 
 # 環境変数を読み込む
 log_info "Loading environment variables from .env..."
-export $(cat .env | grep -v '^#' | xargs)
+if [ -f .env ]; then
+    set -a  # 自動的にexportする
+    source .env
+    set +a  # 自動exportを無効化
+else
+    log_error ".env file not found!"
+    exit 1
+fi
 
 # 必要な環境変数の確認
 if [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$CLAUDE_API_KEY" ]; then
     log_error "ANTHROPIC_API_KEY or CLAUDE_API_KEY must be set in .env file!"
     exit 1
 fi
+
+# 環境変数の確認（デバッグ用）
+log_info "Environment variables loaded:"
+log_info "  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:0:20}...${ANTHROPIC_API_KEY: -4}"
+log_info "  CLAUDE_MCP_CONFIG_PATH: $CLAUDE_MCP_CONFIG_PATH"
+log_info "  CLAUDE_SKIP_PERMISSIONS: $CLAUDE_SKIP_PERMISSIONS"
+log_info "  CLAUDE_DEBUG: $CLAUDE_DEBUG"
 
 if [ -z "$CLAUDE_MCP_CONFIG_PATH" ]; then
     log_error "CLAUDE_MCP_CONFIG_PATH must be set in .env file!"
@@ -128,6 +142,11 @@ fi
 # 2. Python SDK server の起動
 log_info "Starting Python SDK server on port ${PYTHON_SERVER_PORT:-8888}..."
 cd "$SCRIPT_DIR/backend"
+# 環境変数を明示的にエクスポート
+export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+export CLAUDE_MCP_CONFIG_PATH="$CLAUDE_MCP_CONFIG_PATH"
+export CLAUDE_SKIP_PERMISSIONS="$CLAUDE_SKIP_PERMISSIONS"
+export CLAUDE_DEBUG="$CLAUDE_DEBUG"
 nohup python3 claude_sdk_server.py > "$LOGS_DIR/python_server.log" 2>&1 &
 PYTHON_PID=$!
 echo $PYTHON_PID > "$PIDS_DIR/python_server.pid"

@@ -43,6 +43,7 @@ from claude_code_sdk import (
     ClaudeSDKError,
     ResultMessage,
     TextBlock,
+    query,
 )
 
 try:  # Preferred modern SDK interface
@@ -195,11 +196,12 @@ async def query_claude(prompt: str, options: Optional[ClaudeCodeOptions] = None)
         "mcp_config": options.mcp_servers if isinstance(options.mcp_servers, (str, os.PathLike)) else list(options.mcp_servers.keys()) if isinstance(options.mcp_servers, dict) else None,
     }, ensure_ascii=False), file=sys.stderr)
 
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        text_segments: List[str] = []
-        result_payload: Dict[str, Any] | None = None
-        async for message in client.receive_response():
+    # SDKの代わりに直接query関数を使用
+    text_segments: List[str] = []
+    result_payload: Dict[str, Any] | None = None
+    
+    try:
+        async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
@@ -216,6 +218,9 @@ async def query_claude(prompt: str, options: Optional[ClaudeCodeOptions] = None)
                     "result": message.result,
                 }
                 break
+    except Exception as e:
+        print(f"[ERROR] Query failed: {e}", file=sys.stderr)
+        raise
 
     print("[CLAUDE] done", json.dumps({
         "prompt": prompt,
