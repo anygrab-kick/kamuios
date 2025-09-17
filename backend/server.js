@@ -1101,12 +1101,16 @@ const server = http.createServer((req, res) => {
             if (mcpPath && fs.existsSync(mcpPath)) {
                 const data = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
                 const raw = data.mcpServers || data.servers || {};
+                const baseUrl = process.env.MCP_BASE_URL || 'https://kamui-code.ai';
+                
                 for (const [name, cfg] of Object.entries(raw)) {
                     if (!cfg || typeof cfg !== 'object') continue;
+                    // URLの{BASE_URL}を実際のベースURLに置換
+                    const url = (cfg.url || cfg.endpoint || cfg.command || '').replace('{BASE_URL}', baseUrl);
                     servers.push({
                         name: name,
                         type: cfg.type || cfg.kind || '',
-                        url: cfg.url || cfg.endpoint || cfg.command || '',
+                        url: url,
                         description: cfg.description || cfg.comment || ''
                     });
                 }
@@ -1118,17 +1122,124 @@ const server = http.createServer((req, res) => {
             res.writeHead(500);
             res.end(JSON.stringify({ error: 'mcp_read_error', detail: err.message, config_path: mcpPath }));
         }
+    } else if (requestUrl.pathname === '/api/claude/mcp/tool-info' && req.method === 'GET') {
+        // 特定のMCPツールの詳細情報を取得
+        const toolUrl = requestUrl.searchParams.get('url');
+        if (!toolUrl) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Missing url parameter' }));
+            return;
+        }
+        
+        try {
+            console.log(`[MCP] Fetching tool info via curl pipeline: ${toolUrl}`);
+            const protoVer = '2025-06-18';
+            const timeoutSec = Number.parseInt(process.env.MCP_TOOLINFO_TIMEOUT || '12', 10) || 12;
+
+            const escapeSingleQuotes = (value) => String(value).replace(/'/g, `'"'"'`);
+            const escapedUrl = escapeSingleQuotes(toolUrl);
+            const initPayload = JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'initialize',
+                params: {
+                    protocolVersion: protoVer,
+                    capabilities: {},
+                    clientInfo: { name: 'curl', version: '0.1' }
+                }
+            });
+            const listPayload = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+
+            const command = `
+TOOL_URL='${escapedUrl}';
+SESSION_ID=$(curl -s -i -X POST "$TOOL_URL" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '${escapeSingleQuotes(initPayload)}' \
+  | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d "\\r\\n");
+if [ -z "$SESSION_ID" ]; then
+  echo "Failed to acquire MCP-Session-Id" >&2;
+  exit 86;
+fi;
+curl -s -X POST "$TOOL_URL" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -H 'MCP-Protocol-Version: ${protoVer}' \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -d '${escapeSingleQuotes(listPayload)}' \
+| jq -r '.result.tools[] | select(.name | test("submit")) | {name, description, required: (.inputSchema.required // []), properties: (.inputSchema.properties // {})}'
+`.trim();
+
+            console.log('[MCP] Executing curl pipeline command');
+            exec(command, {
+                shell: '/bin/bash',
+                timeout: timeoutSec * 1000,
+                maxBuffer: 8 * 1024 * 1024
+            }, (error, stdout, stderr) => {
+                if (error) {
+                    console.error('[MCP] curl pipeline failed', {
+                        code: error.code,
+                        signal: error.signal,
+                        message: error.message,
+                        stderr: stderr ? stderr.slice(0, 800) : ''
+                    });
+                    res.writeHead(502);
+                    res.end(JSON.stringify({
+                        error: 'curl_pipeline_failed',
+                        detail: error.message,
+                        code: error.code,
+                        signal: error.signal,
+                        stderr: stderr
+                    }));
+                    return;
+                }
+
+                const trimmedStdout = stdout.trim();
+                if (trimmedStdout) {
+                    console.log('[MCP] curl pipeline stdout (truncated):', trimmedStdout.slice(0, 400));
+                }
+                if (stderr) {
+                    console.warn('[MCP] curl pipeline stderr (truncated):', stderr.slice(0, 400));
+                }
+
+                let submitTool = null;
+                const jsonLines = trimmedStdout.split(/\r?\n/).filter(line => line.trim().length > 0);
+                for (const line of jsonLines) {
+                    try {
+                        const parsed = JSON.parse(line);
+                        if (parsed && parsed.name) {
+                            submitTool = parsed;
+                            break;
+                        }
+                    } catch (parseErr) {
+                        console.warn('[MCP] Failed to parse jq output line', line.slice(0, 120));
+                    }
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    url: toolUrl,
+                    submitTool,
+                    raw: trimmedStdout,
+                    stderr: stderr || ''
+                }));
+            });
+        } catch (err) {
+            console.error('[MCP] Tool info error:', err);
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'Internal error', detail: err.message }));
+        }
     } else {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Not found' }));
     }
 });
 
-if (!process.env.PORT) {
-    console.error('ERROR: PORT environment variable is not set');
-    process.exit(1);
+let resolvedPort = process.env.PORT;
+if (!resolvedPort) {
+    resolvedPort = '7777';
+    process.env.PORT = resolvedPort;
+    console.warn('[Server] PORT env var missing, defaulting to 7777');
 }
-const PORT = process.env.PORT;
+const PORT = resolvedPort;
 server.listen(PORT, () => {
     console.log(`Media scanner server running at http://localhost:${PORT}`);
     console.log(`API endpoint: http://localhost:${PORT}/api/scan`);

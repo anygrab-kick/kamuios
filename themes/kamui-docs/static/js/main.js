@@ -881,7 +881,6 @@ async function renderServers(){
     servers.slice(0, 8).forEach((server, idx) => {
       const name = String(server.name || `server-${idx+1}`);
       const desc = String(server.description || server.url || '');
-      const details = mcpToolDetails[name] || {};
       
       // カテゴリを推測
       let category = 'creative';
@@ -899,26 +898,88 @@ async function renderServers(){
       card.style.position = 'relative';
       setCardGradient(card, name);
       
-      // ツールチップを含むカード内容
+      // 基本的なカード内容のみ
       card.innerHTML = `
         <div class="card-title">${name.replace(/^[ti]2[ivmt]-kamui-/, '').replace(/-/g, ' ')}</div>
         <span class="badge">${category}</span>
         <span class="badge">${vendor}</span>
-        <div class="endpoint">${details.endpoint || '/api/...'}</div>
-        <div class="server-card-tooltip">
-          <div class="tooltip-content">
-            <div class="tooltip-desc">${escapeHtml(desc)}</div>
-            ${details.endpoint ? `<div class="tooltip-section"><strong>エンドポイント:</strong> ${details.method} ${escapeHtml(details.endpoint)}</div>` : ''}
-            ${details.params ? `<div class="tooltip-section"><strong>パラメータ:</strong><br>${escapeHtml(details.params)}</div>` : ''}
-            ${details.example ? `<div class="tooltip-section"><strong>使用例:</strong><br><code>${escapeHtml(details.example)}</code></div>` : ''}
-          </div>
-        </div>
+        <div class="endpoint">/api/...</div>
       `;
       
       card.style.cursor = 'pointer';
       card.addEventListener('click', () => {
         const usage = buildUsage(category, server.url || '');
         openJsonModal(usage, name);
+      });
+      
+      // ホバーイベントで詳細情報を取得
+      card.addEventListener('mouseenter', async () => {
+        const fixedTooltip = getTooltipElement();
+        if (fixedTooltip) {
+          setTooltipSource(card);
+          fixedTooltip.innerHTML = `
+            <div class="mcp-tooltip-content">
+              <div class="mcp-tooltip-desc">${escapeHtml(desc)}</div>
+              <div class="mcp-tooltip-section">詳細情報を読み込み中...</div>
+            </div>
+          `;
+          fixedTooltip.classList.add('visible');
+          fixedTooltip.scrollTop = 0;
+          
+          try {
+            const toolData = {
+              name: name,
+              description: desc,
+              url: server.url
+            };
+            const details = await fetchMCPToolDetails(toolData);
+
+            const sections = [];
+            if (details.error) {
+              sections.push(`<div class="mcp-tooltip-section error">⚠️ ${escapeHtml(details.error)}</div>`);
+            }
+            if (details.endpoint) {
+              sections.push(`<div class="mcp-tooltip-section"><strong>エンドポイント:</strong> ${details.method ? `${escapeHtml(details.method)} ` : ''}${escapeHtml(details.endpoint)}</div>`);
+            }
+            if (details.params) {
+              sections.push(`<div class="mcp-tooltip-section"><strong>パラメータ:</strong><br>${escapeHtml(details.params)}</div>`);
+            }
+            if (details.example) {
+              sections.push(`<div class="mcp-tooltip-section"><strong>使用例:</strong><br><code>${escapeHtml(details.example)}</code></div>`);
+            }
+            if (details.rawSnippet) {
+              sections.push(`<div class="mcp-tooltip-section"><strong>Raw:</strong><br><code>${escapeHtml(details.rawSnippet)}</code></div>`);
+            }
+
+            fixedTooltip.innerHTML = `
+              <div class="mcp-tooltip-content">
+                <div class="mcp-tooltip-desc">${escapeHtml(desc)}</div>
+                ${sections.join('\n')}
+              </div>
+            `;
+
+            const endpointEl = card.querySelector('.endpoint');
+            if (endpointEl) {
+              endpointEl.textContent = details.endpoint || '/api/...';
+            }
+          } catch (err) {
+            console.warn('Failed to load server details:', err);
+            fixedTooltip.innerHTML = `
+              <div class="mcp-tooltip-content">
+                <div class="mcp-tooltip-desc">${escapeHtml(desc)}</div>
+                <div class="mcp-tooltip-section error">⚠️ ${escapeHtml(err && err.message ? err.message : '詳細の取得に失敗しました')}</div>
+              </div>
+            `;
+          }
+        }
+      });
+      
+      card.addEventListener('mouseleave', (e) => {
+        const tooltip = getTooltipElement();
+        if (tooltip && e.relatedTarget && tooltip.contains(e.relatedTarget)) {
+          return;
+        }
+        scheduleTooltipHide(card);
       });
       
       serverContainer.appendChild(card);
@@ -949,6 +1010,197 @@ async function renderServers(){
       serverContainer.appendChild(card);
     });
   }
+}
+
+// MCPツール詳細情報キャッシュ
+const mcpToolCache = {};
+
+// ツールチップ状態管理（カード/ダイヤル共通）
+const tooltipState = { source: null, hover: false, hideTimeout: null };
+
+function getTooltipElement() {
+  const tooltip = document.getElementById('mcpDialTooltipFixed');
+  if (tooltip && !tooltip.dataset.tooltipManaged) {
+    tooltip.dataset.tooltipManaged = 'true';
+    tooltip.addEventListener('mouseenter', () => {
+      tooltipState.hover = true;
+      if (tooltipState.hideTimeout) {
+        clearTimeout(tooltipState.hideTimeout);
+        tooltipState.hideTimeout = null;
+      }
+    });
+    tooltip.addEventListener('mouseleave', () => {
+      tooltipState.hover = false;
+      scheduleTooltipHide(tooltipState.source);
+    });
+  }
+  return tooltip;
+}
+
+function setTooltipSource(el) {
+  if (tooltipState.source && tooltipState.source !== el) {
+    tooltipState.source.classList.remove('tooltip-source-active');
+  }
+  tooltipState.source = el || null;
+  if (tooltipState.hideTimeout) {
+    clearTimeout(tooltipState.hideTimeout);
+    tooltipState.hideTimeout = null;
+  }
+  if (el) {
+    el.classList.add('tooltip-source-active');
+  }
+}
+
+function hideTooltip() {
+  const tooltip = document.getElementById('mcpDialTooltipFixed');
+  if (!tooltip) return;
+  tooltip.classList.remove('visible');
+  tooltipState.hover = false;
+  if (tooltipState.source) {
+    tooltipState.source.classList.remove('tooltip-source-active');
+  }
+  tooltipState.source = null;
+}
+
+function scheduleTooltipHide(source) {
+  if (tooltipState.hideTimeout) {
+    clearTimeout(tooltipState.hideTimeout);
+  }
+  tooltipState.hideTimeout = window.setTimeout(() => {
+    const tooltip = document.getElementById('mcpDialTooltipFixed');
+    if (!tooltip) return;
+    if (tooltipState.hover) return;
+    if (source && typeof source.matches === 'function' && source.matches(':hover')) return;
+    if (tooltipState.source && tooltipState.source !== source) return;
+    hideTooltip();
+  }, 700);
+}
+
+// MCPツール詳細情報を取得する関数
+async function fetchMCPToolDetails(tool) {
+  const toolName = tool.name;
+  const backendBase = (() => {
+    if (typeof state !== 'undefined' && state && state.backendBase) return state.backendBase;
+    if (typeof window !== 'undefined' && typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) return window.KAMUI_BACKEND_BASE;
+    return 'http://localhost:7777';
+  })();
+
+  if (mcpToolCache[toolName]) {
+    return mcpToolCache[toolName];
+  }
+
+  const buildSnippet = (text) => {
+    if (!text) return '';
+    return text.length > 1200 ? `${text.slice(0, 1200)}\n...` : text;
+  };
+
+  const normalizeRaw = (value) => {
+    if (value === null || value === undefined) return '';
+    if (typeof value !== 'string') {
+      try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+    }
+    const trimmed = value.trim();
+    const tryJson = (input) => {
+      try { return JSON.stringify(JSON.parse(input), null, 2); } catch (_) { return null; }
+    };
+    const parsed = tryJson(trimmed) || tryJson(trimmed.replace(/\\n/g, '\n').replace(/\\t/g, '\t'));
+    if (parsed) return parsed;
+    return trimmed.replace(/\\r?\\n/g, '\n').replace(/\\t/g, '\t');
+  };
+
+  let details = null;
+
+  if (tool.url) {
+    try {
+      const endpointUrl = `${backendBase.replace(/\/$/, '')}/api/claude/mcp/tool-info?url=${encodeURIComponent(tool.url)}`;
+      const infoRes = await fetch(endpointUrl, { cache: 'no-store' });
+      const rawBody = await infoRes.text();
+      let payload = null;
+      try {
+        payload = rawBody ? JSON.parse(rawBody) : null;
+      } catch (parseErr) {
+        console.warn(`Failed to parse tool-info payload for ${toolName}:`, parseErr);
+      }
+
+      if (!infoRes.ok) {
+        const normalized = normalizeRaw(rawBody);
+        details = {
+          error: `HTTP ${infoRes.status} ${infoRes.statusText || ''}`.trim(),
+          endpoint: '',
+          method: '',
+          params: '',
+          example: '',
+          rawText: normalized,
+          rawSnippet: buildSnippet(normalized)
+        };
+      } else if (payload && payload.submitTool) {
+        const params = payload.submitTool.properties || {};
+        const paramList = Object.entries(params)
+          .map(([key, schema]) => `${key}: ${(schema && (schema.description || schema.type)) || ''}`)
+          .join(', ');
+        const normalized = normalizeRaw(payload.raw || rawBody);
+        details = {
+          endpoint: tool.url.replace(/^https?:\/\/[^\/]+/, '') + (payload.submitTool.name ? `/submit` : ''),
+          method: 'POST',
+          params: paramList || 'No parameters',
+          example: JSON.stringify(
+            Object.fromEntries(
+              Object.entries(params).map(([key, schema]) => [
+                key,
+                (schema && schema.example) || (schema && schema.type === 'number' ? 0 : (schema && schema.type === 'boolean' ? false : `example ${key}`))
+              ])
+            ),
+            null,
+            2
+          ),
+          rawText: normalized,
+          rawSnippet: buildSnippet(normalized)
+        };
+      } else if (payload) {
+        const rawSource = typeof payload.raw !== 'undefined' ? payload.raw : payload;
+        const raw = normalizeRaw(rawSource);
+        details = {
+          error: payload.error || '',
+          endpoint: '',
+          method: '',
+          params: '',
+          example: '',
+          rawText: raw,
+          rawSnippet: buildSnippet(raw)
+        };
+      } else if (rawBody) {
+        const normalized = normalizeRaw(rawBody);
+        details = {
+          endpoint: '',
+          method: '',
+          params: '',
+          example: '',
+          rawText: normalized,
+          rawSnippet: buildSnippet(normalized)
+        };
+      }
+    } catch (err) {
+      console.warn(`Failed to load details for ${toolName}:`, err);
+      const message = err && err.message ? err.message : String(err);
+      const normalized = normalizeRaw(err && err.stack ? err.stack : message);
+      details = {
+        error: `Network error: ${message}`,
+        endpoint: '',
+        method: '',
+        params: '',
+        example: '',
+        rawText: normalized,
+        rawSnippet: buildSnippet(normalized)
+      };
+    }
+  }
+
+  if (!details || (!details.endpoint && !details.rawText && !details.error)) {
+    details = mcpToolDetails[toolName] || {};
+  }
+
+  mcpToolCache[toolName] = details;
+  return details;
 }
 
 // MCPツール詳細情報マッピングを関数の外に移動（グローバルに）
@@ -1379,6 +1631,12 @@ async function initDocMenuTable() {
       `;
       dialContainer.appendChild(center);
       
+      // 固定位置のツールチップ
+      const fixedTooltip = document.createElement('div');
+      fixedTooltip.className = 'mcp-dial-tooltip-fixed';
+      fixedTooltip.id = 'mcpDialTooltipFixed';
+      dialOverlay.appendChild(fixedTooltip);
+      
       // ツールアイテムコンテナ
       const itemsContainer = document.createElement('div');
       itemsContainer.id = 'mcpDialItems';
@@ -1398,12 +1656,14 @@ async function initDocMenuTable() {
       // イベントリスナー
       closeBtn.addEventListener('click', () => {
         dialOverlay.classList.remove('active');
+        hideTooltip();
         if (inputEl) inputEl.focus();
       });
       
       dialOverlay.addEventListener('click', (e) => {
         if (e.target === dialOverlay) {
           dialOverlay.classList.remove('active');
+          hideTooltip();
           if (inputEl) inputEl.focus();
         }
       });
@@ -1421,6 +1681,7 @@ async function initDocMenuTable() {
         
         if (e.key === 'Escape') {
           dialOverlay.classList.remove('active');
+          hideTooltip();
           if (inputEl) inputEl.focus();
         } else if (e.key === 'Enter') {
           const activeItem = dialOverlay.querySelector('.mcp-dial-item.active');
@@ -1477,22 +1738,21 @@ async function initDocMenuTable() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const servers = Array.isArray(data.servers) ? data.servers : [];
-        // ツール配列に正規化（name/description + 詳細情報）
-        state.mcpTools = servers.map((s, idx) => {
+        
+        // 基本情報のみを保持（詳細はホバー時に取得）
+        const tools = servers.map((s, idx) => {
           const toolName = String(s.name || `tool-${idx+1}`);
-          const details = mcpToolDetails[toolName] || {};
           return {
             name: toolName,
             description: String(s.description || s.url || ''),
             icon: guessIconFromName(toolName),
             color: guessColorFromName(toolName),
-            // 詳細情報を追加
-            endpoint: details.endpoint || '',
-            method: details.method || 'POST',
-            params: details.params || '',
-            example: details.example || ''
+            url: s.url || ''
           };
         });
+        
+        state.mcpTools = tools;
+        console.log('MCP tools loaded:', state.mcpTools.length);
       } catch(err) {
         console.warn('Failed to load MCP tools from backend:', err);
         state.mcpTools = [];
@@ -1644,26 +1904,12 @@ async function initDocMenuTable() {
         const iconCat = guessIconFromName(tool.name);
         const categoryInfo = getCategoryColors(iconCat);
         
-        // 詳細なツールチップ内容を構築
-        let tooltipContent = escapeHtml(tool.description);
-        if (tool.endpoint || tool.params || tool.example) {
-          tooltipContent = `
-            <div class="mcp-tooltip-content">
-              <div class="mcp-tooltip-desc">${escapeHtml(tool.description)}</div>
-              ${tool.endpoint ? `<div class="mcp-tooltip-section"><strong>エンドポイント:</strong> ${tool.method} ${escapeHtml(tool.endpoint)}</div>` : ''}
-              ${tool.params ? `<div class="mcp-tooltip-section"><strong>パラメータ:</strong><br>${escapeHtml(tool.params)}</div>` : ''}
-              ${tool.example ? `<div class="mcp-tooltip-section"><strong>使用例:</strong><br><code>${escapeHtml(tool.example)}</code></div>` : ''}
-            </div>
-          `;
-        }
-        
         item.innerHTML = `
           <div class="mcp-dial-item-inner">
             <div class="mcp-dial-icon" style="background: ${categoryInfo.bg};">
               <img src="${categoryInfo.icon}" style="width: 80%; height: 80%; object-fit: contain; filter: brightness(0) invert(1);" />
             </div>
             <div class="mcp-dial-label">${escapeHtml(tool.name)}</div>
-            ${tool.description ? `<div class="mcp-dial-tooltip">${tooltipContent}</div>` : ''}
           </div>
         `;
         
@@ -1676,16 +1922,77 @@ async function initDocMenuTable() {
               inputEl.focus();
             }
             dialOverlay.classList.remove('active');
+            hideTooltip();
           }, 300);
         });
         
         // ホバー効果
-        item.addEventListener('mouseenter', () => {
+        item.addEventListener('mouseenter', async () => {
           // 他のアクティブ状態をクリア
           itemsContainer.querySelectorAll('.mcp-dial-item').forEach(el => {
             el.classList.remove('active');
           });
           item.classList.add('active');
+          
+          // 固定位置のツールチップに内容を表示
+          const fixedTooltip = getTooltipElement();
+          if (fixedTooltip && tool.description) {
+            setTooltipSource(item);
+            // ローディング表示
+            fixedTooltip.innerHTML = `
+              <div class="mcp-tooltip-content">
+                <div class="mcp-tooltip-desc">${escapeHtml(tool.description)}</div>
+                <div class="mcp-tooltip-section">詳細情報を読み込み中...</div>
+              </div>
+            `;
+            fixedTooltip.classList.add('visible');
+            fixedTooltip.scrollTop = 0;
+            
+            // 詳細情報を非同期で取得
+            try {
+              const details = await fetchMCPToolDetails(tool);
+              const sections = [];
+              if (details.error) {
+                sections.push(`<div class=\"mcp-tooltip-section error\">⚠️ ${escapeHtml(details.error)}</div>`);
+              }
+              if (details.endpoint) {
+                sections.push(`<div class=\"mcp-tooltip-section\"><strong>エンドポイント:</strong> ${details.method ? `${escapeHtml(details.method)} ` : ''}${escapeHtml(details.endpoint)}</div>`);
+              }
+              if (details.params) {
+                sections.push(`<div class=\"mcp-tooltip-section\"><strong>パラメータ:</strong><br>${escapeHtml(details.params)}</div>`);
+              }
+              if (details.example) {
+                sections.push(`<div class=\"mcp-tooltip-section\"><strong>使用例:</strong><br><code>${escapeHtml(details.example)}</code></div>`);
+              }
+              if (details.rawSnippet) {
+                sections.push(`<div class=\"mcp-tooltip-section\"><strong>Raw:</strong><br><code>${escapeHtml(details.rawSnippet)}</code></div>`);
+              }
+
+              fixedTooltip.innerHTML = `
+                <div class=\"mcp-tooltip-content\">
+                  <div class=\"mcp-tooltip-desc\">${escapeHtml(tool.description)}</div>
+                  ${sections.join('\\n')}
+                </div>
+              `;
+            } catch (err) {
+              console.warn('Failed to load tool details:', err);
+              fixedTooltip.innerHTML = `
+                <div class=\"mcp-tooltip-content\">
+                  <div class=\"mcp-tooltip-desc\">${escapeHtml(tool.description)}</div>
+                  <div class=\"mcp-tooltip-section error\">⚠️ ${escapeHtml(err && err.message ? err.message : '詳細の取得に失敗しました')}</div>
+                </div>
+              `;
+            }
+          }
+        });
+        
+        // マウスが離れたらツールチップを非表示
+        item.addEventListener('mouseleave', (e) => {
+          const tooltip = getTooltipElement();
+          if (tooltip && e.relatedTarget && tooltip.contains(e.relatedTarget)) {
+            return;
+          }
+          scheduleTooltipHide(item);
         });
         
         itemsContainer.appendChild(item);
@@ -1899,6 +2206,7 @@ async function initDocMenuTable() {
     document.addEventListener('click', (e) => {
       if (!panel.contains(e.target) && dialOverlay && !dialOverlay.contains(e.target)) {
         dialOverlay.classList.remove('active');
+        hideTooltip();
       }
     });
     listEl?.addEventListener('click', async (e) => {
