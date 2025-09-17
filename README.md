@@ -31,8 +31,8 @@ KamuiOSは以下の機能を提供します：
 #### 前提条件
 
 - Node.js 18.x 以上
-- Python 3.8 以上
 - Hugo 0.110.0 以上
+- Claude Code CLI（[インストール手順](https://github.com/anthropics/claude-code)）
 - Claude API Key（[Anthropic](https://www.anthropic.com/)から取得）
 
 #### 1. プロジェクトのクローンと環境設定
@@ -58,7 +58,8 @@ SCAN_PATH=/Users/yourname/kamuios/  # メディアファイルのスキャンパ
 
 # オプション設定（デフォルト値あり）
 PORT=7777  # Node.jsサーバーのポート
-PYTHON_SERVER_PORT=8888  # Python SDKサーバーのポート
+CLAUDE_MAX_TURNS=8  # Claude AIの最大ターン数
+CLAUDE_DEBUG=1  # デバッグモード（0 または 1）
 ```
 
 #### 3. 一括起動（推奨）
@@ -70,18 +71,17 @@ PYTHON_SERVER_PORT=8888  # Python SDKサーバーのポート
 ```
 
 これにより以下が自動的に実行されます：
-- ✅ Node.js バックエンドサーバー（Dynamic Media Gallery用）
-- ✅ Python SDK サーバー（AIエージェント機能用）
+- ✅ Node.js バックエンドサーバー（Dynamic Media Gallery + AIエージェント機能）
 - ✅ Hugo 開発サーバー（メインWebインターフェース）
 - ✅ ブラウザで http://localhost:1313/ を自動で開く
 
 #### 4. アクセスURL
 
 - **メインインターフェース**: http://localhost:1313/
+- **メインインターフェース**: http://localhost:1313/
 - **Dynamic Media Gallery**: http://localhost:1313/#dynamic-media-gallery
 - **3D Directory Graph**: http://localhost:1313/dir-graph-ar.html
 - **Node.js API**: http://localhost:7777/
-- **Python SDK API**: http://localhost:8888/
 
 #### 5. サービスの停止
 
@@ -115,7 +115,6 @@ kill -9 <PID>
 # または個別に停止
 pkill hugo
 pkill node
-pkill python3
 ```
 
 #### ログの確認
@@ -123,7 +122,6 @@ pkill python3
 ```bash
 # 各サービスのログを確認
 tail -f logs/node_server.log     # Node.jsサーバー
-tail -f logs/python_server.log   # Python SDKサーバー
 tail -f logs/hugo_server.log     # Hugoサーバー
 ```
 
@@ -158,8 +156,9 @@ Claude APIを活用した高度なAIアシスタント機能です。
 - 🛠️ MCP（Model Context Protocol）によるツール統合
 - 🎨 画像生成、動画生成、音楽生成などの創作支援
 - 📝 コード生成、文書作成、データ分析
+- 🚀 Headlessモードによる高速実行
 
-円形ダイヤルインターフェースから各種AIツールにアクセスできます。
+円形ダイヤルインターフェースから各種AIツールにアクセスできます。`--verbose`オプションにより、AIとの詳細な対話ログを取得できます。
 
 ### Directory Graph 3D AR/VR
 
@@ -312,39 +311,32 @@ KamuiOSは2つのサーバーで構成されています：
 
 ## AIエージェントタスク（右下フローティング）
 
-円形ダイヤルでMCPツールを選択し、Claude Code SDKバックエンドにプロンプトを送るUIを提供します。
+円形ダイヤルでMCPツールを選択し、Claude Code CLIのheadlessモードでプロンプトを実行するUIを提供します。
 
 ### 必要なサーバー
 
-- バックエンド1: メディア・ユーティリティAPI（Node.js）
+- バックエンド: 統合API（Node.js）
   - ファイル: `backend/server.js`
   - 既定ポート: `7777`
-  - 用途: 画像/動画のオープン、SCAN_PATHのディレクトリを操作
-
-- バックエンド2: Claude Code SDK プロキシ（Python）
-  - ファイル: `backend/claude_sdk_server.py`
-  - 既定ポート: `8888`
-  - 用途: MCP設定を読み込み、`/chat` でClaudeに問い合わせ
+  - 用途: 
+    - 画像/動画のオープン、SCAN_PATHのディレクトリを操作
+    - Claude Code CLIのheadlessモード実行 (`/api/claude/chat`)
+    - MCP設定の読み込みとツール一覧取得 (`/api/claude/mcp/servers`)
 
 ### 必須/推奨の環境変数
 
 `.env`（プロジェクトルート推奨）
 
 ```
-# Node メディアAPI用
+# Node.js 統合APIサーバー用
 PORT=7777                       # backend/server.js の公開ポート
 SCAN_PATH=/absolute/path/to/media # 画像/動画などのルート
 
-# Claude Code CLI/SDK 共通
+# Claude Code CLI 設定
 CLAUDE_MCP_CONFIG_PATH=/Users/<you>/kamuicode/mcp-genmedia-go/.claude/mcp-kamui-code.json
-CLAUDE_MAX_TURNS=8              # 省略可
+CLAUDE_MAX_TURNS=8              # 省略可（デフォルト: 無制限）
 CLAUDE_DEBUG=1                  # 省略可（デバッグ出力）
-CLAUDE_SKIP_PERMISSIONS=1       # 省略可（CLIのみ）
-
-# Python SDK サーバー用（必要に応じて）
-PYTHON_SERVER_HOST=127.0.0.1
-PYTHON_SERVER_PORT=8888
-CLAUDE_CWD=/Users/<you>/kamuios # 省略可・作業ディレクトリ
+CLAUDE_SKIP_PERMISSIONS=1       # 省略可（権限スキップ）
 ```
 
 Shell環境（例: `~/.zshrc`）に以下が必要な場合があります:
@@ -365,10 +357,10 @@ export ANTHROPIC_API_KEY=sk-ant-...   # または CLAUDE_API_KEY
 
 機能：
 - ✅ Node.js バックエンドサーバー（ポート 7777）
-- ✅ Python SDK サーバー（ポート 8888）
 - ✅ Hugo 開発サーバー（ポート 1313）
 - ✅ ブラウザで http://localhost:1313/ を自動で開く
 - ✅ リアルタイムでログを監視
+- ✅ Claude Code CLIのheadlessモード統合
 
 サービスの停止：
 
@@ -379,37 +371,24 @@ export ANTHROPIC_API_KEY=sk-ant-...   # または CLAUDE_API_KEY
 
 ログファイルの場所：
 - Node.js: `logs/node_server.log`
-- Python SDK: `logs/python_server.log`
 - Hugo: `logs/hugo_server.log`
 
 #### 方法2: 個別起動
 
-1) Node メディアAPI
+1) Node.js 統合APIサーバー
 
 ```bash
 cd backend
 node server.js     # PORT と SCAN_PATH を .env で設定
 ```
 
-2) Claude SDK Python サーバー
-
-```bash
-cd backend
-# 環境変数を読み込んで起動
-export $(cat ../.env | grep -v '^#' | xargs)
-python3 claude_sdk_server.py
-# → http://127.0.0.1:8888/health が ok になれば準備完了
-```
-
-**注意**: Python SDKサーバーは`.env`ファイルを自動で読み込みません。必ず環境変数を設定してから起動してください。
-
-3) Hugo を起動
+2) Hugo を起動
 
 ```bash
 hugo server -D -p 1313
 ```
 
-4) ブラウザでアクセス
+3) ブラウザでアクセス
 
 `http://localhost:1313/` を開き、右下のロボットボタンを押すか、タスク入力欄で `/` を入力すると円形ダイヤルが開きます。
 
@@ -417,15 +396,13 @@ hugo server -D -p 1313
 
 クエリで上書きできます：
 
-- `?backend=http://127.0.0.1:7777` … Node API ベースURL
-- `?claude=http://127.0.0.1:8888` … Claude SDK サーバー ベースURL
+- `?backend=http://127.0.0.1:7777` … Node.js 統合API ベースURL
 
 または、グローバル変数で定義：
 
 ```html
 <script>
   window.KAMUI_BACKEND_BASE = 'http://127.0.0.1:7777';
-  window.KAMUI_CLAUDE_BASE = 'http://127.0.0.1:8888';
 </script>
 ```
 
@@ -434,9 +411,52 @@ hugo server -D -p 1313
 - 円形ダイヤルにツールが出ない: 
   - `CLAUDE_MCP_CONFIG_PATH` が`.env`ファイルに設定されているか確認
   - 指定されたパスにMCP設定ファイルが存在するか確認
-  - `curl http://localhost:8888/mcp` で設定が読み込まれているか確認
+  - `curl http://localhost:7777/api/claude/mcp/servers` で設定が読み込まれているか確認
 - 送信が失敗する: 
   - `ANTHROPIC_API_KEY`（または `CLAUDE_API_KEY`）が有効か確認
-  - Pythonサーバーが環境変数を正しく読み込んでいるか確認（起動スクリプトを使用）
-  - `/chat` のHTTPステータスを確認
+  - Claude Code CLIがインストールされているか確認（`claude --version`）
+  - `/api/claude/chat` のHTTPステータスを確認
+  - `--verbose`オプションによる詳細ログを確認
 - Finder/エクスプローラが開かない: `SCAN_PATH` が正しい絶対パスか、OSの種類に合った `open/start/xdg-open` が呼べるか確認
+
+### Headlessモードの利点
+
+- **高速実行**: Python SDKサーバーが不要になり、直接CLIを実行
+- **詳細なログ**: `--verbose`オプションでAIとの対話を完全に記録
+- **シンプルな構成**: Node.jsサーバーのみで全機能を提供
+- **安定性向上**: プロセス間通信の削減
+
+### Python SDKサーバーからの移行
+
+既存のPython SDKサーバー（`claude_sdk_server.py`）を使用している場合、以下の手順で移行できます：
+
+1. Claude Code CLIのインストール確認
+   ```bash
+   # CLIがインストールされているか確認
+   claude --version
+   
+   # インストールされていない場合は、公式ドキュメントに従ってインストール
+   # https://github.com/anthropics/claude-code
+   ```
+
+2. `.env`ファイルの確認
+   ```bash
+   # CLAUDE_MCP_CONFIG_PATHが設定されていることを確認
+   grep CLAUDE_MCP_CONFIG_PATH .env
+   ```
+
+3. 新しい方式で起動
+   ```bash
+   ./start_all.sh
+   ```
+
+4. 動作確認
+   ```bash
+   # MCP設定が読み込まれているか確認
+   curl http://localhost:7777/api/claude/mcp/servers
+   
+   # ヘルスチェック
+   curl http://localhost:7777/api/claude/health
+   ```
+
+**注**: Python SDKサーバーのファイル（`backend/claude_sdk_server.py`）は削除しても構いませんが、必要に応じてバックアップしておくことをお勧めします。

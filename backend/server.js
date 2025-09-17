@@ -119,6 +119,9 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
     // CLIコマンドの構築
     const args = [];
 
+    // --verboseオプションを常に追加（詳細なログ出力のため）
+    args.push('--verbose');
+
     if (process.env.CLAUDE_SKIP_PERMISSIONS === '1' || process.env.CLAUDE_SKIP_PERMISSIONS === 'true') {
         args.push('--dangerously-skip-permissions');
     }
@@ -132,7 +135,7 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
 
     const extraArgKeys = extraArgs && typeof extraArgs === 'object' ? Object.keys(extraArgs) : [];
     const hasOutputFormat = extraArgKeys.some(k => k === 'output-format' || k === 'outputFormat');
-    const defaultOutputFormat = process.env.CLAUDE_OUTPUT_FORMAT || 'json';
+    const defaultOutputFormat = process.env.CLAUDE_OUTPUT_FORMAT || 'stream-json';
     if (!hasOutputFormat && defaultOutputFormat) {
         args.push('--output-format', defaultOutputFormat);
     }
@@ -153,7 +156,8 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         });
     }
     
-    // プロンプトは標準入力経由で送るため、コマンドライン引数には含めない
+    // ヘッドレスモード (-p) でプロンプトを引数として追加
+    args.push('-p', prompt);
     
     const cmd = `claude ${args.join(' ')}`;
     console.log(`[TASK ${id}] Starting: ${cmd}`);
@@ -166,11 +170,8 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         stdio: ['pipe', 'pipe', 'pipe']
     });
     
-    // プロンプトを標準入力に書き込む
-    if (prompt) {
-        child.stdin.write(prompt);
-        child.stdin.end();
-    }
+    // ヘッドレスモードではstdinは使わない
+    child.stdin.end();
     
     const nowIso = new Date().toISOString();
     const task = {
@@ -932,6 +933,191 @@ const server = http.createServer((req, res) => {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ task: publicTaskView(task, includeLogs) }));
+    } else if (requestUrl.pathname === '/api/claude/chat' && req.method === 'POST') {
+        // Claude headlessモードエンドポイント（Python SDKサーバーの代替）
+        let body = '';
+        req.on('data', chunk => { body += chunk.toString(); });
+        req.on('end', async () => {
+            try {
+                const payload = body ? JSON.parse(body) : {};
+                const prompt = payload.prompt || '';
+                
+                if (!prompt.trim()) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Prompt is required' }));
+                    return;
+                }
+                
+                const mcpConfigPath = process.env.CLAUDE_MCP_CONFIG_PATH;
+                if (!mcpConfigPath || !fs.existsSync(mcpConfigPath)) {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'MCP configuration not found', path: mcpConfigPath }));
+                    return;
+                }
+                
+                // Claude CLIをheadlessモードで実行（stream-jsonフォーマットを使用）
+                // システムプロンプトを日本語で追加
+                const systemPrompt = "あなたはコマンドラインヘルパーです。ユーザーがリソースを要求した場合、curlでダウンロードし、明示的なローカルファイルパスに保存して、最終メッセージでそのパスを報告してください。URLが生成された場合は、保存されたファイルパスと一緒に最終レスポンスに含めてください。リクエストは提供されたMCPツール（Imagen4関連のエンドポイントなど）のみを使用して満たす必要があり、非MCPサービスにフォールバックしてはいけません。MCPツールが使用できない場合は、別のプロバイダーに切り替えるのではなく、明示的なエラーを返してください。ステータスチェックが必要な場合は、10秒単位でsleepコマンドを使用してチェックを行ってください。";
+                
+                const args = [
+                    '-p', // --print (non-interactive mode)
+                    prompt, // プロンプトは-pの直後に配置
+                    '--output-format', 'stream-json',
+                    '--verbose',
+                    '--mcp-config', mcpConfigPath,
+                    '--append-system-prompt', systemPrompt
+                ];
+                
+                if (process.env.CLAUDE_MAX_TURNS) {
+                    args.push('--max-turns', process.env.CLAUDE_MAX_TURNS);
+                }
+                
+                if (process.env.CLAUDE_SKIP_PERMISSIONS === '1' || process.env.CLAUDE_SKIP_PERMISSIONS === 'true') {
+                    args.push('--dangerously-skip-permissions');
+                }
+                
+                console.log('[CLAUDE CHAT] Starting headless execution:', 'claude', args.join(' '));
+                
+                // Promiseでラップして同期的に処理
+                const result = await new Promise((resolve, reject) => {
+                    const child = spawn('claude', args, {
+                        env: { ...process.env, PATH: `${process.env.PATH || ''}:/opt/homebrew/bin:/usr/local/bin:/usr/bin` },
+                        cwd: process.cwd()
+                    });
+                    
+                    const messages = [];
+                    let buffer = '';
+                    let finalResult = null;
+                    
+                    // headlessモードではstdinは使わない
+                    child.stdin.end();
+                    
+                    child.stdout.on('data', (chunk) => {
+                        buffer += chunk.toString();
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // 最後の不完全な行を保持
+                        
+                        for (const line of lines) {
+                            if (line.trim()) {
+                                try {
+                                    const msg = JSON.parse(line);
+                                    messages.push(msg);
+                                    
+                                    // アシスタントのテキストメッセージを収集
+                                    if (msg.type === 'assistant' && msg.message && msg.message.content) {
+                                        for (const content of msg.message.content) {
+                                            if (content.type === 'text') {
+                                                console.log('[CLAUDE CHAT] Assistant response:', content.text);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // 最終結果を保存
+                                    if (msg.type === 'result') {
+                                        finalResult = msg;
+                                    }
+                                } catch (e) {
+                                    console.error('[CLAUDE CHAT] Failed to parse line:', line, e);
+                                }
+                            }
+                        }
+                    });
+                    
+                    child.stderr.on('data', (chunk) => {
+                        console.log('[CLAUDE CHAT] STDERR:', chunk.toString());
+                    });
+                    
+                    child.on('close', (code) => {
+                        if (code === 0) {
+                            // アシスタントのテキストメッセージを抽出
+                            let responseText = '';
+                            for (const msg of messages) {
+                                if (msg.type === 'assistant' && msg.message && msg.message.content) {
+                                    for (const content of msg.message.content) {
+                                        if (content.type === 'text') {
+                                            responseText += content.text + '\n';
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // 最終結果オブジェクトを構築
+                            const result = finalResult || {};
+                            result.result = responseText.trim();
+                            result.messages = messages;
+                            
+                            resolve(result);
+                        } else {
+                            reject(new Error(`Claude exited with code ${code}`));
+                        }
+                    });
+                    
+                    child.on('error', (err) => {
+                        reject(err);
+                    });
+                });
+                
+                // レスポンスフォーマットをPython SDKサーバーと互換性を保つ
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                    prompt: prompt,
+                    response: result.result || '',
+                    result: {
+                        num_turns: result.num_turns,
+                        duration_ms: result.duration_ms,
+                        duration_api_ms: result.duration_api_ms,
+                        is_error: result.is_error,
+                        total_cost_usd: result.total_cost_usd,
+                        usage: result.usage,
+                        session_id: result.session_id,
+                        result: result.result
+                    }
+                }));
+                
+            } catch (err) {
+                console.error('[CLAUDE CHAT] Error:', err);
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+    } else if (requestUrl.pathname === '/api/claude/health' && req.method === 'GET') {
+        // Claude headlessモード用ヘルスチェック
+        const mcpConfigPath = process.env.CLAUDE_MCP_CONFIG_PATH;
+        const mcpExists = mcpConfigPath && fs.existsSync(mcpConfigPath);
+        
+        res.writeHead(200);
+        res.end(JSON.stringify({
+            status: 'ok',
+            host: '127.0.0.1',
+            port: process.env.PORT || 7777,
+            mcp_config_path: mcpConfigPath,
+            mcp_config_exists: mcpExists
+        }));
+    } else if (requestUrl.pathname === '/api/claude/mcp/servers' && req.method === 'GET') {
+        // MCP設定からサーバー一覧を返す
+        const mcpPath = process.env.CLAUDE_MCP_CONFIG_PATH;
+        try {
+            const servers = [];
+            if (mcpPath && fs.existsSync(mcpPath)) {
+                const data = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+                const raw = data.mcpServers || data.servers || {};
+                for (const [name, cfg] of Object.entries(raw)) {
+                    if (!cfg || typeof cfg !== 'object') continue;
+                    servers.push({
+                        name: name,
+                        type: cfg.type || cfg.kind || '',
+                        url: cfg.url || cfg.endpoint || cfg.command || '',
+                        description: cfg.description || cfg.comment || ''
+                    });
+                }
+            }
+            res.writeHead(200);
+            res.end(JSON.stringify({ config_path: mcpPath, servers: servers }));
+        } catch (err) {
+            console.error('[MCP] List error:', err);
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'mcp_read_error', detail: err.message, config_path: mcpPath }));
+        }
     } else {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Not found' }));

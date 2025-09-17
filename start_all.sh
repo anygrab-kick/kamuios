@@ -3,7 +3,6 @@
 # Kamui OS 全サービス起動スクリプト
 # このスクリプトは以下のサービスを起動します：
 # - Node.js backend server (port 7777)
-# - Python SDK server (port 8888)  
 # - Hugo development server (port 1313)
 
 # スクリプトのディレクトリを取得
@@ -49,16 +48,6 @@ function stop_all() {
             log_info "Stopped Node.js server (PID: $PID)"
         fi
         rm -f "$PIDS_DIR/node_server.pid"
-    fi
-    
-    # Python SDK server
-    if [ -f "$PIDS_DIR/python_server.pid" ]; then
-        PID=$(cat "$PIDS_DIR/python_server.pid")
-        if kill -0 $PID 2>/dev/null; then
-            kill $PID
-            log_info "Stopped Python SDK server (PID: $PID)"
-        fi
-        rm -f "$PIDS_DIR/python_server.pid"
     fi
     
     # Hugo server
@@ -139,33 +128,7 @@ else
     exit 1
 fi
 
-# 2. Python SDK server の起動
-log_info "Starting Python SDK server on port ${PYTHON_SERVER_PORT:-8888}..."
-cd "$SCRIPT_DIR/backend"
-# 環境変数を明示的にエクスポート
-export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
-export CLAUDE_MCP_CONFIG_PATH="$CLAUDE_MCP_CONFIG_PATH"
-export CLAUDE_SKIP_PERMISSIONS="$CLAUDE_SKIP_PERMISSIONS"
-export CLAUDE_DEBUG="$CLAUDE_DEBUG"
-nohup python3 claude_sdk_server.py > "$LOGS_DIR/python_server.log" 2>&1 &
-PYTHON_PID=$!
-echo $PYTHON_PID > "$PIDS_DIR/python_server.pid"
-sleep 2
-
-# Python SDKサーバーの起動確認
-if kill -0 $PYTHON_PID 2>/dev/null; then
-    # ヘルスチェック
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:${PYTHON_SERVER_PORT:-8888}/health | grep -q "200"; then
-        log_success "Python SDK server started (PID: $PYTHON_PID)"
-    else
-        log_warn "Python SDK server process is running but health check failed"
-    fi
-else
-    log_error "Failed to start Python SDK server. Check logs/python_server.log for details."
-    exit 1
-fi
-
-# 3. Hugo development server の起動
+# 2. Hugo development server の起動
 log_info "Starting Hugo development server on port 1313..."
 cd "$SCRIPT_DIR"
 nohup hugo server -D -p 1313 > "$LOGS_DIR/hugo_server.log" 2>&1 &
@@ -188,11 +151,9 @@ printf "\n"
 printf "Service URLs:\n"
 printf "  - Kamui OS (Hugo):     http://localhost:1313/\n"
 printf "  - Node.js API:         http://localhost:%s/\n" "${PORT:-7777}"
-printf "  - Python SDK API:      http://localhost:%s/\n" "${PYTHON_SERVER_PORT:-8888}"
 printf "\n"
 printf "Log files:\n"
 printf "  - Node.js:    logs/node_server.log\n"
-printf "  - Python SDK: logs/python_server.log\n"
 printf "  - Hugo:       logs/hugo_server.log\n"
 printf "\n"
 printf "To stop all services, run: ./start_all.sh stop\n"
@@ -218,4 +179,4 @@ fi
 
 # ログをtailして表示（すべてのサービスのログを監視）
 log_info "Monitoring logs (press Ctrl+C to stop all services)..."
-tail -f "$LOGS_DIR/node_server.log" "$LOGS_DIR/python_server.log" "$LOGS_DIR/hugo_server.log"
+tail -f "$LOGS_DIR/node_server.log" "$LOGS_DIR/hugo_server.log"

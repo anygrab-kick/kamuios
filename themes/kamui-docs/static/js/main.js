@@ -1131,14 +1131,11 @@ async function initDocMenuTable() {
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
       const STORAGE_KEY = 'kamui_task_board_v1';
-      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: '/backend', claudeBase: 'http://127.0.0.1:8888', mcpTools: [] };
+      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [] };
     const params = new URLSearchParams(location.search);
     const queryBackend = params.get('backend');
-    const queryClaude = params.get('claude');
     if (typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) state.backendBase = window.KAMUI_BACKEND_BASE;
     else if (queryBackend) state.backendBase = queryBackend;
-    if (typeof window.KAMUI_CLAUDE_BASE === 'string' && window.KAMUI_CLAUDE_BASE) state.claudeBase = window.KAMUI_CLAUDE_BASE;
-    else if (queryClaude) state.claudeBase = queryClaude;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -1300,12 +1297,12 @@ async function initDocMenuTable() {
       const add = (s) => { if (s && !candidates.includes(s)) candidates.push(s); };
       // 優先: 明示指定
       add(state.backendBase);
-      // 典型候補
+      // 典型候補（Node.jsサーバーを最優先）
+      add('http://localhost:7777');
+      add('http://127.0.0.1:7777');
       add('/backend');
       add('http://localhost:3001/backend');
       add('http://127.0.0.1:3001/backend');
-      add('http://localhost:7777');
-      add('http://127.0.0.1:7777');
       for (const base of candidates) {
         try {
           const url = base.replace(/\/$/, '') + '/api/config';
@@ -1316,27 +1313,11 @@ async function initDocMenuTable() {
       return state.backendBase;
     }
 
-    async function probeClaudeBase(){
-      const candidates = [];
-      const add = (s) => { if (s && !candidates.includes(s)) candidates.push(s); };
-      add(state.claudeBase);
-      add('http://127.0.0.1:8888');
-      add('http://localhost:8888');
-      for (const base of candidates) {
-        try {
-          const res = await fetch(base.replace(/\/$/, '') + '/health', { cache: 'no-cache' });
-          if (res.ok) { state.claudeBase = base; return base; }
-        } catch(_) {}
-      }
-      return state.claudeBase;
-    }
-    
     async function loadMCPTools(){
-      // バックエンド（Python SDKサーバー）から、現在参照中のMCP定義を取得
+      // バックエンド（Node.jsサーバー）から、現在参照中のMCP定義を取得
       try {
-        // まずClaude SDKサーバーのベースURLを推測
-        const claudeBase = await probeClaudeBase();
-        const res = await fetch(`${claudeBase.replace(/\/$/, '')}/mcp/servers`, { cache: 'no-cache' });
+        const backendBase = await probeBackendBase();
+        const res = await fetch(`${backendBase.replace(/\/$/, '')}/api/claude/mcp/servers`, { cache: 'no-cache' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const servers = Array.isArray(data.servers) ? data.servers : [];
@@ -1575,11 +1556,11 @@ async function initDocMenuTable() {
       mergeTask(task);
       render();
       try {
-        const base = await probeClaudeBase();
+        const base = await probeBackendBase();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分のタイムアウト
         
-        const res = await fetch(`${base.replace(/\/$/, '')}/chat`, { 
+        const res = await fetch(`${base.replace(/\/$/, '')}/api/claude/chat`, { 
           method: 'POST', 
           headers: { 'Content-Type': 'application/json' }, 
           body: JSON.stringify({ prompt }),
