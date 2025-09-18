@@ -1,8 +1,8 @@
-# サブ従業員
+# サブエージェント
 - id: prompts-repo
   category: 6
-  category_name: 従業員
-  title: 従業員
+  category_name: エージェント
+  title: エージェント
   content: ""
   yaml_files:
     - data/saas/employees_hiring-agent.yaml

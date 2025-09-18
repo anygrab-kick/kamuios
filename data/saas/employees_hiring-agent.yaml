@@ -1,8 +1,8 @@
 - id: employees_hiring-agent
   category: 10
-  category_name: 従業員
+  category_name: エージェント
   title: 採用担当（Recruiter）
-  description: AI従業員を追加します。
+  description: AIエージェントを追加します。
   video: /videos/recruiter_card_video_square.mp4
   content: |
     data/saas/employees_* のファイルを

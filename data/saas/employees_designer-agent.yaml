@@ -1,6 +1,6 @@
 - id: employees_designer-agent
   category: 10
-  category_name: 従業員
+  category_name: エージェント
   title: デザイナー（UI/ビジュアル）
   description: KAMUI OS のUI/ビジュアルデザイン全般。コンポーネント設計、テーマ/トークン整備、モーダル・カード等の質感調整、レスポンシブ最適化。
   video: /videos/ai_portrait_card.mp4

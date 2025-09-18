@@ -311,21 +311,70 @@
       
       // バックエンドベースURL（ngrok/localhost/プロキシ）
       function getBackendBase() {
+        const cleanup = (value) => {
+          if (!value || typeof value !== 'string') return null;
+          return value.trim().replace(/\/$/, '') || null;
+        };
+
+        const remember = (value) => {
+          try {
+            if (value) localStorage.setItem('kamuiBackend', value);
+          } catch(_) {}
+        };
+
         try {
           const params = new URLSearchParams(location.search);
-          const q = params.get('backend');
+          const q = cleanup(params.get('backend'));
           if (q) {
-            const cleaned = q.replace(/\/$/, '');
-            localStorage.setItem('kamuiBackend', cleaned);
-            return cleaned;
-          }
-          const saved = (localStorage.getItem('kamuiBackend') || '').trim();
-          if (saved) return saved.replace(/\/$/, '');
-          if (location.protocol.startsWith('http')) {
-            return location.origin + '/backend';
+            remember(q);
+            return q;
           }
         } catch(_) {}
-        return 'http://localhost:7777';
+
+        // Taskboard 側の永続化データにベースURLがあれば優先
+        try {
+          const raw = localStorage.getItem('kamui_task_board_v1');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            const persisted = cleanup(parsed && parsed.backendBase);
+            if (persisted) {
+              remember(persisted);
+              return persisted;
+            }
+          }
+        } catch(_) {}
+
+        try {
+          const saved = cleanup(localStorage.getItem('kamuiBackend'));
+          if (saved) return saved;
+        } catch(_) {}
+
+        if (typeof window !== 'undefined') {
+          const globalBase = cleanup(window.KAMUI_BACKEND_BASE);
+          if (globalBase) {
+            remember(globalBase);
+            return globalBase;
+          }
+        }
+
+        if (typeof location !== 'undefined') {
+          if (location.port === '1313') {
+            const localBase = 'http://localhost:7777';
+            remember(localBase);
+            return localBase;
+          }
+          if (location.origin && location.origin !== 'null') {
+            const proxied = cleanup(`${location.origin}/backend`);
+            if (proxied) {
+              remember(proxied);
+              return proxied;
+            }
+          }
+        }
+
+        const fallback = 'http://localhost:7777';
+        remember(fallback);
+        return fallback;
       }
       const backendBase = getBackendBase();
 

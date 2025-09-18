@@ -1579,7 +1579,7 @@ async function initDocMenuTable() {
   }
 }
 
-  // 右下フローティング AIエージェント タスクボード（フロントのみ・ローカルストレージ永続化）
+  // 右下フローティング オーケストレーターボード（フロントのみ・ローカルストレージ永続化）
   function initTaskBoard(){
     try {
       if (window.__aiTaskBoardInit) return;
@@ -1587,8 +1587,14 @@ async function initDocMenuTable() {
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
       const STORAGE_KEY = 'kamui_task_board_v1';
+      const STORAGE_VERSION = 2;
+      const MAX_TASK_HISTORY = 40;
+      const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
+      const PERSIST_DELAY_MS = 350;
+      const MAX_LOG_LENGTH = 60000; // 60KBぶんだけ保持
       const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [], saasDocs: [] };
-      const taskLogsCache = {};
+      const taskLogsCache = Object.create(null);
+      let persistTimer = null;
       const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
       const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
       const MARKDOWN_INLINE_CODE = /`([^`]+)`/g;
@@ -1680,26 +1686,172 @@ async function initDocMenuTable() {
         closeBlockquote();
         return parts.join('');
       }
-    const params = new URLSearchParams(location.search);
-    const queryBackend = params.get('backend');
-    if (typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) state.backendBase = window.KAMUI_BACKEND_BASE;
-    else if (queryBackend) state.backendBase = queryBackend;
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw);
-        if (saved && typeof saved === 'object') {
-          if (typeof saved.open === 'boolean') state.open = saved.open;
+
+      function taskCacheKey(task){
+        if (!task) return '';
+        if (task.serverId) return String(task.serverId);
+        if (task.id != null) return String(task.id);
+        return '';
+      }
+
+      function cloneTaskForStorage(task){
+        if (!task || task.id == null) return null;
+        const rawLogs = Array.isArray(task.logs)
+          ? task.logs
+          : (typeof task.logs === 'string' ? [task.logs] : []);
+        const logs = rawLogs
+          .map(log => {
+            const text = String(log);
+            return text.length > MAX_LOG_LENGTH ? text.slice(-MAX_LOG_LENGTH) : text;
+          })
+          .filter(Boolean);
+        return {
+          id: String(task.id),
+          serverId: task.serverId != null ? String(task.serverId) : null,
+          status: typeof task.status === 'string' ? task.status : 'running',
+          prompt: typeof task.prompt === 'string' ? task.prompt : '',
+          response: typeof task.response === 'string' ? task.response : '',
+          result: task.result && typeof task.result === 'object' ? task.result : (task.result ?? null),
+          error: task.error == null ? null : String(task.error),
+          createdAt: task.createdAt || null,
+          updatedAt: task.updatedAt || null,
+          logs
+        };
+      }
+
+      function hydrateCachedTask(raw){
+        const record = cloneTaskForStorage(raw);
+        if (!record) return null;
+        return {
+          id: record.id,
+          serverId: record.serverId,
+          status: record.status || 'running',
+          prompt: record.prompt || '',
+          response: record.response || '',
+          result: record.result ?? null,
+          error: record.error ?? null,
+          createdAt: record.createdAt || null,
+          updatedAt: record.updatedAt || null,
+          logs: Array.isArray(record.logs)
+            ? record.logs.map(log => {
+                const text = String(log);
+                return text.length > MAX_LOG_LENGTH ? text.slice(-MAX_LOG_LENGTH) : text;
+              })
+            : []
+        };
+      }
+
+      function cleanupTasksAndLogs(){
+        const now = Date.now();
+        const filtered = state.tasks.filter(task => {
+          if (!task) return false;
+          if (!task.createdAt) return true;
+          const ts = Date.parse(task.createdAt);
+          if (!Number.isFinite(ts)) return true;
+          return now - ts <= MAX_TASK_AGE_MS;
+        });
+        state.tasks = filtered.slice(0, MAX_TASK_HISTORY);
+        const keepKeys = new Set(state.tasks.map(taskCacheKey).filter(Boolean));
+        Object.keys(taskLogsCache).forEach(key => {
+          if (!keepKeys.has(key)) delete taskLogsCache[key];
+        });
+      }
+
+      function persistNow(){
+        try {
+          const prepared = state.tasks.slice(0, MAX_TASK_HISTORY).map(cloneTaskForStorage).filter(Boolean);
+          const keepKeys = new Set(prepared.map(task => (task.serverId ? String(task.serverId) : String(task.id))).filter(Boolean));
+          const logsPayload = {};
+          keepKeys.forEach(key => {
+            const value = taskLogsCache[key];
+            if (typeof value === 'string' && value.trim()) {
+              logsPayload[key] = value.length > MAX_LOG_LENGTH ? value.slice(-MAX_LOG_LENGTH) : value;
+            }
+          });
+          const payload = {
+            version: STORAGE_VERSION,
+            open: !!state.open,
+            tasks: prepared,
+            logs: logsPayload,
+            backendBase: state.backendBase,
+            persistedAt: new Date().toISOString()
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        } catch(err) {
+          console.warn('TaskBoard state persist failed', err);
         }
       }
-    } catch(_) {}
-    function saveOpen(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open: state.open })); } catch(_) {} }
+
+      function schedulePersist(){
+        if (persistTimer) return;
+        persistTimer = setTimeout(() => {
+          persistTimer = null;
+          persistNow();
+        }, PERSIST_DELAY_MS);
+      }
+
+      function loadPersistedState(){
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return;
+          const saved = JSON.parse(raw);
+          if (!saved || typeof saved !== 'object') return;
+          if (typeof saved.open === 'boolean') state.open = saved.open;
+          if (typeof saved.backendBase === 'string' && saved.backendBase) {
+            state.backendBase = saved.backendBase;
+          }
+          if (Array.isArray(saved.tasks)) {
+            const revived = saved.tasks.map(hydrateCachedTask).filter(Boolean);
+            if (revived.length) {
+              revived.sort((a, b) => {
+                const aTime = Date.parse(a.createdAt || '') || 0;
+                const bTime = Date.parse(b.createdAt || '') || 0;
+                return bTime - aTime;
+              });
+              state.tasks = revived.slice(0, MAX_TASK_HISTORY);
+            }
+          }
+          if (saved.logs && typeof saved.logs === 'object') {
+            Object.entries(saved.logs).forEach(([key, value]) => {
+              if (typeof value === 'string') taskLogsCache[key] = value;
+            });
+          }
+          cleanupTasksAndLogs();
+          schedulePersist();
+        } catch(err) {
+          console.warn('TaskBoard state load failed', err);
+        }
+      }
+
+      loadPersistedState();
+
+      window.addEventListener('beforeunload', () => {
+        if (persistTimer) {
+          clearTimeout(persistTimer);
+          persistTimer = null;
+        }
+        persistNow();
+      });
+
+    const params = new URLSearchParams(location.search);
+    const queryBackend = params.get('backend');
+    if (typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) {
+      if (state.backendBase !== window.KAMUI_BACKEND_BASE) {
+        state.backendBase = window.KAMUI_BACKEND_BASE;
+        schedulePersist();
+      }
+    } else if (queryBackend) {
+      if (state.backendBase !== queryBackend) {
+        state.backendBase = queryBackend;
+        schedulePersist();
+      }
+    }
 
     // 要素生成
     const toggleBtn = document.createElement('button');
     toggleBtn.className = 'taskboard-toggle';
-    toggleBtn.setAttribute('aria-label', 'AIエージェント タスクを開く');
-    toggleBtn.setAttribute('title', 'AIエージェント タスク');
+    toggleBtn.setAttribute('aria-label', 'オーケストレーターを開く');
+    toggleBtn.setAttribute('title', 'オーケストレーター');
     // SVGイルカアイコン（淡い水色）
     toggleBtn.innerHTML = `
       <svg class="bot-icon" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1722,7 +1874,7 @@ async function initDocMenuTable() {
 
     panel.innerHTML = `
       <div class="taskboard-header">
-        <div class="tb-title">AIエージェント タスク</div>
+        <div class="tb-title">オーケストレーター</div>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
         </div>
@@ -1864,7 +2016,13 @@ async function initDocMenuTable() {
         try {
           const url = base.replace(/\/$/, '') + '/api/config';
           const res = await fetch(url, { cache: 'no-cache', mode: 'cors' });
-          if (res.ok) { state.backendBase = base; return base; }
+          if (res.ok) {
+            if (state.backendBase !== base) {
+              state.backendBase = base;
+              schedulePersist();
+            }
+            return base;
+          }
         } catch(_) {}
       }
       return state.backendBase;
@@ -1914,7 +2072,10 @@ async function initDocMenuTable() {
       // バックエンド（Node.jsサーバー）から、現在参照中のMCP定義を取得
       try {
         const backendBase = await probeBackendBase();
-        state.backendBase = backendBase;
+        if (state.backendBase !== backendBase) {
+          state.backendBase = backendBase;
+          schedulePersist();
+        }
         const res = await fetch(`${backendBase.replace(/\/$/, '')}/api/claude/mcp/servers`, { cache: 'no-cache' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -2244,10 +2405,23 @@ async function initDocMenuTable() {
       }
     }
     function mergeTask(task){
+      if (task && typeof task === 'object') {
+        if (Array.isArray(task.logs)) {
+          task.logs = task.logs.map(log => {
+            const text = String(log);
+            return text.length > MAX_LOG_LENGTH ? text.slice(-MAX_LOG_LENGTH) : text;
+          });
+        } else if (typeof task.logs === 'string') {
+          const text = task.logs;
+          task.logs = text.length > MAX_LOG_LENGTH ? text.slice(-MAX_LOG_LENGTH) : text;
+        }
+      }
       const id = String(task.id);
       const idx = state.tasks.findIndex(x => String(x.id) === id);
       if (idx >= 0) state.tasks[idx] = task; else state.tasks.unshift(task);
       state.tasks.sort((a,b)=>new Date(b.createdAt||0) - new Date(a.createdAt||0));
+      cleanupTasksAndLogs();
+      schedulePersist();
     }
     async function submitRemoteTask(text){
       const prompt = String(text||'').trim();
@@ -2281,8 +2455,14 @@ async function initDocMenuTable() {
         task.logs = assistantLogs;
         const cacheKey = task.serverId || task.id;
         const combinedLogs = assistantLogs.join('\n');
-        if (combinedLogs.trim()) taskLogsCache[cacheKey] = combinedLogs;
-        else delete taskLogsCache[cacheKey];
+        if (combinedLogs.trim()) {
+          const limitedLogs = combinedLogs.length > MAX_LOG_LENGTH ? combinedLogs.slice(-MAX_LOG_LENGTH) : combinedLogs;
+          taskLogsCache[cacheKey] = limitedLogs;
+          schedulePersist();
+        } else {
+          delete taskLogsCache[cacheKey];
+          schedulePersist();
+        }
         task.updatedAt = new Date().toISOString();
       } catch(err) {
         task.status = 'failed';
@@ -2293,7 +2473,8 @@ async function initDocMenuTable() {
         }
         task.updatedAt = new Date().toISOString();
         const errorLog = `ログ取得エラー: ${task.error}`;
-        taskLogsCache[task.serverId || task.id] = errorLog;
+        taskLogsCache[task.serverId || task.id] = errorLog.length > MAX_LOG_LENGTH ? errorLog.slice(-MAX_LOG_LENGTH) : errorLog;
+        schedulePersist();
       }
       mergeTask(task);
       render();
@@ -2312,8 +2493,11 @@ async function initDocMenuTable() {
         const logsArray = Array.isArray(t.logs) ? t.logs : (typeof t.logs === 'string' ? [t.logs] : []);
         const joined = logsArray.join('\n');
         const cacheKey = String(t.serverId || t.id);
-        if (joined.trim()) taskLogsCache[cacheKey] = joined;
-        else delete taskLogsCache[cacheKey];
+        if (joined.trim()) {
+          taskLogsCache[cacheKey] = joined.length > MAX_LOG_LENGTH ? joined.slice(-MAX_LOG_LENGTH) : joined;
+        } else if (!taskLogsCache[cacheKey] || !taskLogsCache[cacheKey].trim()) {
+          delete taskLogsCache[cacheKey];
+        }
       });
       const html = state.tasks.map(t => {
         const s = t.status || 'running';
@@ -2461,6 +2645,7 @@ async function initDocMenuTable() {
           if (!trimmed) {
             hidePopup();
             delete taskLogsCache[cacheKey];
+            schedulePersist();
             return;
           }
           const popup = positionPopup();
@@ -2478,7 +2663,8 @@ async function initDocMenuTable() {
             }
           }
           popup.classList.add('visible');
-          taskLogsCache[cacheKey] = text;
+          taskLogsCache[cacheKey] = text.length > MAX_LOG_LENGTH ? text.slice(-MAX_LOG_LENGTH) : text;
+          schedulePersist();
         };
 
         const setLoading = () => {
@@ -2524,7 +2710,9 @@ async function initDocMenuTable() {
             if (!res.ok) {
               const body = await res.text().catch(() => '');
               const errorMessage = `ログ取得エラー: HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}${body ? `\n${body}` : ''}`;
-              taskLogsCache[cacheKey] = errorMessage;
+              const limitedError = errorMessage.length > MAX_LOG_LENGTH ? errorMessage.slice(-MAX_LOG_LENGTH) : errorMessage;
+              taskLogsCache[cacheKey] = limitedError;
+              schedulePersist();
               if (popupEl && popupEl.classList.contains('visible')) {
                 renderLogs(errorMessage);
               }
@@ -2535,7 +2723,9 @@ async function initDocMenuTable() {
             const logs = data && data.task && typeof data.task.logs === 'string' ? data.task.logs : '';
             if (logs.trim()) {
               if (logs !== previous) {
-                taskLogsCache[cacheKey] = logs;
+                const normalizedLogs = logs.length > MAX_LOG_LENGTH ? logs.slice(-MAX_LOG_LENGTH) : logs;
+                taskLogsCache[cacheKey] = normalizedLogs;
+                schedulePersist();
                 if (popupEl && popupEl.classList.contains('visible')) {
                   renderLogs(logs);
                 }
@@ -2544,6 +2734,7 @@ async function initDocMenuTable() {
               }
             } else {
               delete taskLogsCache[cacheKey];
+              schedulePersist();
               if (initial && popupEl && popupEl.classList.contains('visible')) {
                 hidePopup();
               }
@@ -2551,7 +2742,9 @@ async function initDocMenuTable() {
           } catch (err) {
             const msg = err && err.message ? err.message : String(err);
             const errorText = `ログ取得エラー: ${msg}`;
-            taskLogsCache[cacheKey] = errorText;
+            const limitedErrorText = errorText.length > MAX_LOG_LENGTH ? errorText.slice(-MAX_LOG_LENGTH) : errorText;
+            taskLogsCache[cacheKey] = limitedErrorText;
+            schedulePersist();
             if (popupEl && popupEl.classList.contains('visible')) {
               renderLogs(errorText);
             }
@@ -2603,7 +2796,7 @@ async function initDocMenuTable() {
       panel.classList.toggle('open', state.open);
       panel.setAttribute('aria-hidden', state.open ? 'false' : 'true');
       toggleBtn.setAttribute('aria-pressed', state.open ? 'true' : 'false');
-      saveOpen();
+      schedulePersist();
     }
 
     toggleBtn.addEventListener('click', () => setOpen(!state.open));

@@ -264,9 +264,9 @@
       </div>
     </div>
     
-    <!-- 従業員セクション -->
+    <!-- エージェントセクション -->
     <div class="dashboard-sections">
-      <h2 class="dashboard-section-title">従業員</h2>
+      <h2 class="dashboard-section-title">エージェント</h2>
       <div class="dashboard-links">
         <a href="#prompts-repo" class="saas-app-card" onclick="showSectionById('prompts-repo'); return false;">
           <video src="/videos/agent_card.mp4" alt="create-new-page.md" style="width: 100%; height: 180px; object-fit: cover; border-radius: 8px; margin-bottom: 12px;" autoplay loop muted playsinline></video>
@@ -432,10 +432,10 @@
       });
     </script>
 
-# 従業員ダッシュボード（目次 9-1 または 10-1 として表示）
+# エージェントダッシュボード（目次 9-1 または 10-1 として表示）
 - id: employees-dashboard
   category: 10
-  category_name: 従業員
+  category_name: エージェント
   title: ダッシュボード
   content: ""
 

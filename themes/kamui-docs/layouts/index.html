@@ -165,7 +165,7 @@
         {{ partial "requirements-document" . }}
       </div>
     {{ else if eq .id "employees-dashboard" }}
-      {{/* 従業員ダッシュボード（カード一覧） */}}
+      {{/* エージェントダッシュボード（カード一覧） */}}
       <style>
         #employeesDashboardCards { 
           display: grid; 
@@ -201,11 +201,11 @@
         }
       </style>
       <script>
-        // デバッグ用: 従業員ダッシュボードの動画確認
+        // デバッグ用: エージェントダッシュボードの動画確認
         document.addEventListener('DOMContentLoaded', function() {
           setTimeout(function() {
             const containers = document.querySelectorAll('#employeesDashboardCards .employee-video-container');
-            console.log('従業員動画コンテナ数:', containers.length);
+            console.log('エージェント動画コンテナ数:', containers.length);
             containers.forEach(function(container) {
               const video = container.querySelector('video');
               const dataVideo = container.getAttribute('data-video');
@@ -242,7 +242,7 @@
         {{ end }}
       </div>
     {{ else if hasPrefix .id "employees_" }}
-      {{/* 従業員詳細用の専用パーシャル */}}
+      {{/* エージェント詳細用の専用パーシャル */}}
       {{ partial "employee-detail" . }}
     {{ else }}
       {{ if .content }}
@@ -311,7 +311,7 @@
         {{ .additional_content | markdownify }}
       {{ end }}
       
-      {{/* ダッシュボード内の従業員カード群は削除 */}}
+      {{/* ダッシュボード内のエージェントカード群は削除 */}}
       
       {{ if .custom_html }}
         {{ .custom_html | safeHTML }}
