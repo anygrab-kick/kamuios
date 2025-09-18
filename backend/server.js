@@ -3,6 +3,9 @@ const path = require('path');
 const http = require('http');
 const { exec, spawn } = require('child_process');
 
+const PROJECT_ROOT = path.join(__dirname, '..');
+const SAAS_DIR = path.join(PROJECT_ROOT, 'data', 'saas');
+
 // .envファイルを読み込む（dotenvパッケージなしで実装）
 function loadEnv() {
     const envPath = path.join(__dirname, '..', '.env');
@@ -26,6 +29,86 @@ function loadEnv() {
     }
 }
 loadEnv();
+
+function safeSaasFilename(filename) {
+    if (typeof filename !== 'string') return null;
+    const trimmed = filename.trim();
+    if (!/^[\w.-]+$/.test(trimmed)) return null;
+    if (!trimmed.endsWith('.yaml') && !trimmed.endsWith('.yml')) return null;
+    return trimmed;
+}
+
+function extractYamlTitle(source) {
+    if (!source) return '';
+    const lines = source.split(/\r?\n/).slice(0, 50);
+    for (const line of lines) {
+        const match = line.match(/^\s*title\s*:\s*(.+)$/i);
+        if (match) {
+            return match[1].replace(/^"|"$/g, '').trim();
+        }
+    }
+    return '';
+}
+
+function summarizeYamlContent(source, limit = 240) {
+    if (!source) return '';
+    const compact = source.replace(/\r?\n+/g, '\n').trim();
+    if (compact.length <= limit) return compact;
+    return `${compact.slice(0, limit)}\n...`;
+}
+
+function listSaasYamlFiles() {
+    try {
+        const entries = fs.readdirSync(SAAS_DIR, { withFileTypes: true });
+        const files = [];
+        for (const entry of entries) {
+            if (!entry.isFile()) continue;
+            const safe = safeSaasFilename(entry.name);
+            if (!safe) continue;
+            const filePath = path.join(SAAS_DIR, safe);
+            const stat = fs.statSync(filePath);
+            let title = '';
+            let sample = '';
+            try {
+                const content = fs.readFileSync(filePath, 'utf8');
+                title = extractYamlTitle(content);
+                sample = summarizeYamlContent(content, 280);
+            } catch (err) {
+                console.warn('[SAAS] Failed to read yaml sample', safe, err.message);
+            }
+            const baseId = path.basename(safe, path.extname(safe));
+            files.push({
+                file: safe,
+                id: baseId,
+                title: title,
+                size: stat.size,
+                mtime: stat.mtimeMs,
+                path: `/data/saas/${safe}`,
+                summary: sample
+            });
+        }
+        files.sort((a, b) => a.file.localeCompare(b.file));
+        return files;
+    } catch (err) {
+        console.warn('[SAAS] Failed to list yaml files:', err.message);
+        return [];
+    }
+}
+
+function readSaasYamlFile(filename) {
+    const safe = safeSaasFilename(filename);
+    if (!safe) return null;
+    const absolute = path.join(SAAS_DIR, safe);
+    if (!absolute.startsWith(SAAS_DIR)) return null; // directory traversal guard
+    if (!fs.existsSync(absolute)) return null;
+    const content = fs.readFileSync(absolute, 'utf8');
+    return {
+        file: safe,
+        path: `/data/saas/${safe}`,
+        title: extractYamlTitle(content),
+        content
+    };
+}
 
 function logSanitizedEnv() {
     const key = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '';
@@ -361,7 +444,7 @@ function startMonitor(task, { intervalSec = 10, callbackUrl } = {}) {
 
 function publicTaskView(task, includeLogs = false) {
     if (!task) return null;
-    const joinedLogs = (task.logs || []).join('');
+    const joinedLogs = (task.logs || []).join('\n');
     const maxLen = 20000;
     const takeTail = (value) => {
         if (!value) return '';
@@ -937,6 +1020,8 @@ const server = http.createServer((req, res) => {
         // Claude headlessモードエンドポイント（Python SDKサーバーの代替）
         let body = '';
         req.on('data', chunk => { body += chunk.toString(); });
+        let chatTaskId = null;
+        let taskRecord = null;
         req.on('end', async () => {
             try {
                 const payload = body ? JSON.parse(body) : {};
@@ -955,6 +1040,23 @@ const server = http.createServer((req, res) => {
                     return;
                 }
                 
+                chatTaskId = createTaskId();
+                const createdIso = new Date().toISOString();
+                taskRecord = {
+                    id: chatTaskId,
+                    status: 'running',
+                    prompt,
+                    createdAt: createdIso,
+                    updatedAt: createdIso,
+                    logs: [],
+                    urls: [],
+                    files: [],
+                    resultMeta: null,
+                    resultText: '',
+                    type: 'claude_chat'
+                };
+                tasks[chatTaskId] = taskRecord;
+
                 // Claude CLIをheadlessモードで実行（stream-jsonフォーマットを使用）
                 // システムプロンプトを日本語で追加
                 const systemPrompt = "あなたはコマンドラインヘルパーです。ユーザーがリソースを要求した場合、curlでダウンロードし、明示的なローカルファイルパスに保存して、最終メッセージでそのパスを報告してください。URLが生成された場合は、保存されたファイルパスと一緒に最終レスポンスに含めてください。リクエストは提供されたMCPツール（Imagen4関連のエンドポイントなど）のみを使用して満たす必要があり、非MCPサービスにフォールバックしてはいけません。MCPツールが使用できない場合は、別のプロバイダーに切り替えるのではなく、明示的なエラーを返してください。ステータスチェックが必要な場合は、10秒単位でsleepコマンドを使用してチェックを行ってください。";
@@ -979,7 +1081,7 @@ const server = http.createServer((req, res) => {
                 console.log('[CLAUDE CHAT] Starting headless execution:', 'claude', args.join(' '));
                 
                 // Promiseでラップして同期的に処理
-                const result = await new Promise((resolve, reject) => {
+                const execution = await new Promise((resolve, reject) => {
                     const child = spawn('claude', args, {
                         env: { ...process.env, PATH: `${process.env.PATH || ''}:/opt/homebrew/bin:/usr/local/bin:/usr/bin` },
                         cwd: process.cwd()
@@ -988,6 +1090,8 @@ const server = http.createServer((req, res) => {
                     const messages = [];
                     let buffer = '';
                     let finalResult = null;
+                    const assistantLogs = [];
+                    taskRecord.pid = child.pid;
                     
                     // headlessモードではstdinは使わない
                     child.stdin.end();
@@ -1007,7 +1111,14 @@ const server = http.createServer((req, res) => {
                                     if (msg.type === 'assistant' && msg.message && msg.message.content) {
                                         for (const content of msg.message.content) {
                                             if (content.type === 'text') {
+                                                const formatted = `[CLAUDE CHAT] ${content.text}`;
                                                 console.log('[CLAUDE CHAT] Assistant response:', content.text);
+                                                assistantLogs.push(formatted);
+                                                taskRecord.logs.push(formatted);
+                                                taskRecord.updatedAt = new Date().toISOString();
+                                                if (taskRecord.logs.length > 500) {
+                                                    taskRecord.logs = taskRecord.logs.slice(-500);
+                                                }
                                             }
                                         }
                                     }
@@ -1042,12 +1153,28 @@ const server = http.createServer((req, res) => {
                             }
                             
                             // 最終結果オブジェクトを構築
-                            const result = finalResult || {};
-                            result.result = responseText.trim();
-                            result.messages = messages;
+                            const rawResult = finalResult || {};
+                            rawResult.result = responseText.trim();
+                            taskRecord.status = 'completed';
+                            taskRecord.updatedAt = new Date().toISOString();
+                            taskRecord.endedAt = taskRecord.updatedAt;
+                            taskRecord.resultText = rawResult.result;
+                            taskRecord.resultMeta = {
+                                num_turns: rawResult.num_turns,
+                                duration_ms: rawResult.duration_ms,
+                                duration_api_ms: rawResult.duration_api_ms,
+                                is_error: rawResult.is_error,
+                                total_cost_usd: rawResult.total_cost_usd,
+                                usage: rawResult.usage,
+                                session_id: rawResult.session_id
+                            };
+                            taskRecord.logs = assistantLogs.slice(-500);
                             
-                            resolve(result);
+                            resolve({ raw: rawResult, logs: assistantLogs.slice() });
                         } else {
+                            taskRecord.status = 'failed';
+                            taskRecord.updatedAt = new Date().toISOString();
+                            taskRecord.logs.push(`[ERROR] Claude exited with code ${code}`);
                             reject(new Error(`Claude exited with code ${code}`));
                         }
                     });
@@ -1058,24 +1185,34 @@ const server = http.createServer((req, res) => {
                 });
                 
                 // レスポンスフォーマットをPython SDKサーバーと互換性を保つ
+                const rawResult = execution.raw || {};
+                const assistantLogs = Array.isArray(execution.logs) ? execution.logs : [];
                 res.writeHead(200);
                 res.end(JSON.stringify({
+                    taskId: chatTaskId,
                     prompt: prompt,
-                    response: result.result || '',
+                    response: rawResult.result || '',
+                    logs: assistantLogs,
                     result: {
-                        num_turns: result.num_turns,
-                        duration_ms: result.duration_ms,
-                        duration_api_ms: result.duration_api_ms,
-                        is_error: result.is_error,
-                        total_cost_usd: result.total_cost_usd,
-                        usage: result.usage,
-                        session_id: result.session_id,
-                        result: result.result
+                        num_turns: rawResult.num_turns,
+                        duration_ms: rawResult.duration_ms,
+                        duration_api_ms: rawResult.duration_api_ms,
+                        is_error: rawResult.is_error,
+                        total_cost_usd: rawResult.total_cost_usd,
+                        usage: rawResult.usage,
+                        session_id: rawResult.session_id,
+                        result: rawResult.result
                     }
                 }));
                 
             } catch (err) {
                 console.error('[CLAUDE CHAT] Error:', err);
+                if (taskRecord) {
+                    taskRecord.status = 'failed';
+                    taskRecord.updatedAt = new Date().toISOString();
+                    taskRecord.logs = taskRecord.logs || [];
+                    taskRecord.logs.push(`[ERROR] ${err.message}`);
+                }
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: err.message }));
             }
@@ -1093,6 +1230,20 @@ const server = http.createServer((req, res) => {
             mcp_config_path: mcpConfigPath,
             mcp_config_exists: mcpExists
         }));
+    } else if (requestUrl.pathname === '/api/saas/list' && req.method === 'GET') {
+        const files = listSaasYamlFiles();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ files }));
+    } else if (requestUrl.pathname === '/api/saas/yaml' && req.method === 'GET') {
+        const filename = requestUrl.searchParams.get('file');
+        const data = readSaasYamlFile(filename);
+        if (!data) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'File not found', file: filename }));
+            return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(data));
     } else if (requestUrl.pathname === '/api/claude/mcp/servers' && req.method === 'GET') {
         // MCP設定からサーバー一覧を返す
         const mcpPath = process.env.CLAUDE_MCP_CONFIG_PATH;

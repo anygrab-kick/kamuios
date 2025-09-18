@@ -614,8 +614,136 @@ pre.code code { color: var(--text); }
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;
+  position: relative;
+  overflow: visible;
 }
 .task-item .task-text { color: var(--text); font-size: 0.92rem; line-height: 1.5; }
+.task-item .tb-timestamp {
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="light"] .task-item .tb-timestamp {
+  color: color-mix(in srgb, var(--text) 75%, rgba(0,0,0,0.25));
+}
+.task-item.done .tb-timestamp {
+  color: color-mix(in srgb, #22c55e 55%, var(--text) 45%);
+}
+.task-item.doing .tb-timestamp {
+  color: color-mix(in srgb, #fb923c 55%, var(--text) 45%);
+}
+.task-log-popup {
+  position: fixed;
+  left: 50%;
+  top: 0;
+  background: linear-gradient(180deg, rgba(15,23,42,0.92), rgba(30,41,59,0.92));
+  border: 1px solid rgba(56,189,248,0.48);
+  border-radius: 16px;
+  box-shadow: 0 30px 48px rgba(37,99,235,0.40);
+  padding: 20px 22px 18px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, -20px) scale(0.97);
+  transition: opacity 0.22s ease, visibility 0.22s ease, transform 0.22s ease;
+  z-index: 60000;
+  max-height: 300px;
+  max-width: min(560px, 92vw);
+  min-width: 320px;
+  pointer-events: none;
+}
+.task-log-popup.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, -30px) scale(1);
+  pointer-events: auto;
+}
+.task-log-popup .task-log-inner {
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
+}
+.task-log-popup .task-log-inner p {
+  margin: 3px 0;
+  font-size: 0.66rem;
+  line-height: 1.58;
+  color: color-mix(in srgb, var(--text) 92%, rgba(255,255,255,0.12));
+}
+.task-log-popup .task-log-inner h2,
+.task-log-popup .task-log-inner h3,
+.task-log-popup .task-log-inner h4,
+.task-log-popup .task-log-inner h5,
+.task-log-popup .task-log-inner h6 {
+  margin: 10px 0 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: color-mix(in srgb, var(--text) 94%, rgba(255,255,255,0.15));
+}
+.task-log-popup .task-log-inner ul {
+  margin: 5px 0 8px 18px;
+  padding: 0;
+}
+.task-log-popup .task-log-inner li {
+  margin: 2px 0;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--text) 88%, rgba(255,255,255,0.15));
+}
+.task-log-popup .task-log-inner a {
+  color: #5ec6ff;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(94,198,255,0.5);
+}
+.task-log-popup .task-log-inner a:hover {
+  color: #81d7ff;
+  border-bottom-color: rgba(129,215,255,0.7);
+}
+.task-log-popup .task-log-inner code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.62rem;
+  background: rgba(56,189,248,0.16);
+  padding: 1px 4px 0;
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--text) 94%, rgba(255,255,255,0.2));
+}
+.task-log-popup .task-log-inner blockquote {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-left: 2px solid rgba(56,189,248,0.55);
+  background: rgba(56,189,248,0.05);
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--text) 90%, rgba(255,255,255,0.12));
+}
+.task-log-popup .task-log-inner .log-source {
+  display: inline-block;
+  margin-right: 8px;
+  font-weight: 700;
+  color: #5ec6ff;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+[data-theme="light"] .task-log-popup .task-log-inner .log-source {
+  color: #2563eb;
+}
+[data-theme="light"] .task-log-popup .task-log-inner code {
+  background: rgba(29,78,216,0.12);
+  color: color-mix(in srgb, var(--text) 90%, rgba(0,0,0,0.35));
+}
+[data-theme="light"] .task-log-popup .task-log-inner blockquote {
+  border-left-color: rgba(37,99,235,0.4);
+  background: rgba(37,99,235,0.08);
+  color: color-mix(in srgb, var(--text) 85%, rgba(0,0,0,0.25));
+}
+[data-theme="light"] .task-log-popup {
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94));
+  border-color: rgba(59,130,246,0.45);
+  box-shadow: 0 28px 48px rgba(59,130,246,0.22);
+}
 .task-status {
   width: 24px; height: 24px;
   display: inline-flex; align-items: center; justify-content: center;

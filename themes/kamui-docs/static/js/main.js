@@ -1110,7 +1110,56 @@ async function fetchMCPToolDetails(tool) {
 
   let details = null;
 
-  if (tool.url) {
+  if (tool.saasFile) {
+    try {
+      const endpointBase = (() => {
+        if (typeof state !== 'undefined' && state && state.backendBase) return state.backendBase;
+        if (typeof window !== 'undefined' && typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) return window.KAMUI_BACKEND_BASE;
+        return 'http://localhost:7777';
+      })();
+      const yamlRes = await fetch(`${endpointBase.replace(/\/$/, '')}/api/saas/yaml?file=${encodeURIComponent(tool.saasFile)}`, { cache: 'no-store' });
+      const yamlBody = await yamlRes.text();
+      let yamlPayload = null;
+      try { yamlPayload = yamlBody ? JSON.parse(yamlBody) : null; } catch (err) {
+        console.warn('Failed to parse YAML JSON payload:', err);
+      }
+      if (yamlRes.ok && yamlPayload && typeof yamlPayload === 'object') {
+        const content = normalizeRaw(yamlPayload.content || '');
+        details = {
+          endpoint: yamlPayload.path || tool.saasFile,
+          method: 'YAML',
+          params: tool.saasTitle ? `タイトル: ${tool.saasTitle}` : '',
+          example: tool.saasSummary || '',
+          rawText: content,
+          rawSnippet: buildSnippet(content)
+        };
+      } else {
+        const fallbackRaw = normalizeRaw(yamlBody);
+        details = {
+          error: `YAML fetch failed (${yamlRes.status})`,
+          endpoint: tool.saasPath || tool.saasFile,
+          method: 'YAML',
+          params: tool.saasTitle ? `タイトル: ${tool.saasTitle}` : '',
+          example: tool.saasSummary || '',
+          rawText: fallbackRaw,
+          rawSnippet: buildSnippet(fallbackRaw)
+        };
+      }
+    } catch (err) {
+      console.warn('Failed to load SaaS YAML details:', err);
+      const message = err && err.message ? err.message : String(err);
+      const normalized = normalizeRaw(message);
+      details = {
+        error: `YAML error: ${message}`,
+        endpoint: tool.saasPath || tool.saasFile || '',
+        method: 'YAML',
+        params: tool.saasTitle ? `タイトル: ${tool.saasTitle}` : '',
+        example: tool.saasSummary || '',
+        rawText: normalized,
+        rawSnippet: buildSnippet(normalized)
+      };
+    }
+  } else if (tool.url) {
     try {
       const endpointUrl = `${backendBase.replace(/\/$/, '')}/api/claude/mcp/tool-info?url=${encodeURIComponent(tool.url)}`;
       const infoRes = await fetch(endpointUrl, { cache: 'no-store' });
@@ -1538,7 +1587,99 @@ async function initDocMenuTable() {
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
       const STORAGE_KEY = 'kamui_task_board_v1';
-      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [] };
+      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [], saasDocs: [] };
+      const taskLogsCache = {};
+      const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
+      const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
+      const MARKDOWN_INLINE_CODE = /`([^`]+)`/g;
+      const MARKDOWN_INLINE_LINK = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+
+      function formatInlineMarkdown(text) {
+        let safe = escapeHtml(text);
+        safe = safe.replace(MARKDOWN_INLINE_LINK, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        safe = safe.replace(MARKDOWN_INLINE_CODE, '<code>$1</code>');
+        safe = safe.replace(MARKDOWN_INLINE_BOLD, '<strong>$1</strong>');
+        safe = safe.replace(MARKDOWN_INLINE_EM, '<em>$1</em>');
+        return safe;
+      }
+
+      function markdownToHtml(text) {
+        if (!text) return '';
+        const lines = String(text).split(/\n/);
+        const parts = [];
+        let inList = false;
+        let inBlockquote = false;
+
+        const closeList = () => {
+          if (inList) {
+            parts.push('</ul>');
+            inList = false;
+          }
+        };
+
+        const closeBlockquote = () => {
+          if (inBlockquote) {
+            parts.push('</blockquote>');
+            inBlockquote = false;
+          }
+        };
+
+        for (const raw of lines) {
+          const line = raw.replace(/\r$/, '');
+          const trimmed = line.trim();
+          if (!trimmed) {
+            closeList();
+            closeBlockquote();
+            continue;
+          }
+
+          const claudeMatch = trimmed.match(/^\[CLAUDE CHAT\]\s*(.*)$/);
+          if (claudeMatch) {
+            closeList();
+            closeBlockquote();
+            const rest = claudeMatch[1];
+            const inline = rest ? formatInlineMarkdown(rest) : '';
+            parts.push(`<p><span class="log-source">[CLAUDE CHAT]</span>${inline ? ` ${inline}` : ''}</p>`);
+            continue;
+          }
+
+          if (/^>\s+/.test(trimmed)) {
+            closeList();
+            if (!inBlockquote) {
+              parts.push('<blockquote>');
+              inBlockquote = true;
+            }
+            parts.push(`<p>${formatInlineMarkdown(trimmed.replace(/^>\s+/, ''))}</p>`);
+            continue;
+          } else {
+            closeBlockquote();
+          }
+
+          const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
+          if (headingMatch) {
+            closeList();
+            const level = Math.min(headingMatch[1].length, 6);
+            parts.push(`<h${level}>${formatInlineMarkdown(headingMatch[2])}</h${level}>`);
+            continue;
+          }
+
+          if (/^[-\*]\s+/.test(trimmed)) {
+            if (!inList) {
+              parts.push('<ul>');
+              inList = true;
+            }
+            parts.push(`<li>${formatInlineMarkdown(trimmed.replace(/^[-\*]\s+/, ''))}</li>`);
+            continue;
+          }
+
+          closeList();
+          parts.push(`<p>${formatInlineMarkdown(trimmed)}</p>`);
+        }
+
+        closeList();
+        closeBlockquote();
+        return parts.join('');
+      }
     const params = new URLSearchParams(location.search);
     const queryBackend = params.get('backend');
     if (typeof window.KAMUI_BACKEND_BASE === 'string' && window.KAMUI_BACKEND_BASE) state.backendBase = window.KAMUI_BACKEND_BASE;
@@ -1730,10 +1871,50 @@ async function initDocMenuTable() {
     }
 
 
+    function formatSaasLabel(baseName) {
+      return `saas_${baseName}`;
+    }
+
+    function prettySaasDescription(doc) {
+      if (doc.title) return `${doc.title} (${doc.file})`;
+      return doc.file;
+    }
+
+    async function loadSaasDocuments(backendBase){
+      try {
+        const endpoint = `${backendBase.replace(/\/$/, '')}/api/saas/list`;
+        const res = await fetch(endpoint, { cache: 'no-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = await res.json();
+        const files = Array.isArray(payload.files) ? payload.files : [];
+        const docs = files.map(doc => {
+          const label = formatSaasLabel(doc.id || doc.file.replace(/\.ya?ml$/i, ''));
+          return {
+            name: label,
+            label,
+            description: prettySaasDescription(doc),
+            kind: 'saas',
+            saasFile: doc.file,
+            saasPath: doc.path,
+            saasTitle: doc.title || '',
+            saasSummary: doc.summary || '',
+            icon: 'DOC'
+          };
+        });
+        state.saasDocs = docs;
+        return docs;
+      } catch (err) {
+        console.warn('Failed to load SaaS YAML docs:', err);
+        state.saasDocs = [];
+        return [];
+      }
+    }
+
     async function loadMCPTools(){
       // バックエンド（Node.jsサーバー）から、現在参照中のMCP定義を取得
       try {
         const backendBase = await probeBackendBase();
+        state.backendBase = backendBase;
         const res = await fetch(`${backendBase.replace(/\/$/, '')}/api/claude/mcp/servers`, { cache: 'no-cache' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -1744,18 +1925,27 @@ async function initDocMenuTable() {
           const toolName = String(s.name || `tool-${idx+1}`);
           return {
             name: toolName,
+            label: toolName,
             description: String(s.description || s.url || ''),
             icon: guessIconFromName(toolName),
             color: guessColorFromName(toolName),
             url: s.url || ''
           };
         });
-        
-        state.mcpTools = tools;
-        console.log('MCP tools loaded:', state.mcpTools.length);
+
+        const saasDocs = await loadSaasDocuments(backendBase);
+        state.mcpTools = tools.concat(saasDocs);
+        console.log('MCP tools loaded:', tools.length, 'SaaS docs:', saasDocs.length);
       } catch(err) {
         console.warn('Failed to load MCP tools from backend:', err);
-        state.mcpTools = [];
+        try {
+          const fallbackBase = state.backendBase || 'http://localhost:7777';
+          const saasDocs = await loadSaasDocuments(fallbackBase);
+          state.mcpTools = [...saasDocs];
+        } catch (innerErr) {
+          console.warn('Failed to load SaaS YAML docs during fallback:', innerErr);
+          state.mcpTools = [];
+        }
       }
     }
 
@@ -1771,16 +1961,18 @@ async function initDocMenuTable() {
     }
     
     // カテゴリごとの色定義
-    function getCategoryColors(cat) {
+    function getCategoryColors(cat, tool = {}) {
       const colors = {
         IMG: { bg: '#FF6B6B', icon: 'https://cdn-icons-png.flaticon.com/512/3342/3342137.png' }, // 赤系 - 画像
         VID: { bg: '#4ECDC4', icon: 'https://cdn-icons-png.flaticon.com/512/3179/3179068.png' }, // ターコイズ - 動画
         MUS: { bg: '#95E1D3', icon: 'https://cdn-icons-png.flaticon.com/512/3141/3141766.png' }, // ミント - 音楽
-        VIS: { bg: '#A8E6CF', icon: 'https://cdn-icons-png.flaticon.com/512/2329/2329087.png' }, // ライトグリーン - ビジュアル
+        VIS: { bg: '#A8E6CF', icon: 'https://cdn-icons-png.flaticon.com/512/3179/3179068.png' }, // ライトグリーン - ビジュアル（ビデオアイコンに変更）
         WEB: { bg: '#5B9FFF', icon: 'https://cdn-icons-png.flaticon.com/512/2991/2991114.png' }, // ブルー - ウェブ
-        EDT: { bg: '#C7A8FF', icon: 'https://cdn-icons-png.flaticon.com/512/2920/2920242.png' }, // パープル - エディタ
+        EDT: { bg: '#C7A8FF', icon: 'https://cdn-icons-png.flaticon.com/512/3179/3179068.png' }, // パープル - エディタ（ビデオアイコン共通）
+        DOC: { bg: '#38BDF8', icon: 'https://cdn-icons-png.flaticon.com/512/4205/4205906.png' }, // 水色 - SaaSドキュメント（人型）
         APP: { bg: '#FFD93D', icon: 'https://cdn-icons-png.flaticon.com/512/3573/3573187.png' }  // イエロー - アプリ
       };
+      if (tool && tool.icon && colors[tool.icon]) return colors[tool.icon];
       return colors[cat] || colors.APP;
     }
 
@@ -1817,10 +2009,13 @@ async function initDocMenuTable() {
       if (!itemsContainer || !dialOverlay) return;
       
       const q = searchQuery.toLowerCase();
-      const filtered = q === '' ? state.mcpTools : state.mcpTools.filter(tool => 
-        tool.name.toLowerCase().includes(q) || 
-        (tool.description && tool.description.toLowerCase().includes(q))
-      );
+      const filtered = q === '' ? state.mcpTools : state.mcpTools.filter(tool => {
+        const name = (tool.name || '').toLowerCase();
+        const label = (tool.label || '').toLowerCase();
+        const desc = (tool.description || '').toLowerCase();
+        const summary = (tool.saasSummary || '').toLowerCase();
+        return name.includes(q) || label.includes(q) || desc.includes(q) || summary.includes(q);
+      });
       
       // 既存のアイテムをクリア
       itemsContainer.innerHTML = '';
@@ -1901,15 +2096,15 @@ async function initDocMenuTable() {
         item.setAttribute('data-angle', angleDeg);
         item.style.setProperty('--rotation', `${angleDeg}deg`);
         
-        const iconCat = guessIconFromName(tool.name);
-        const categoryInfo = getCategoryColors(iconCat);
+        const iconCat = tool.kind === 'saas' ? 'DOC' : guessIconFromName(tool.name);
+        const categoryInfo = getCategoryColors(iconCat, tool);
         
         item.innerHTML = `
           <div class="mcp-dial-item-inner">
             <div class="mcp-dial-icon" style="background: ${categoryInfo.bg};">
               <img src="${categoryInfo.icon}" style="width: 80%; height: 80%; object-fit: contain; filter: brightness(0) invert(1);" />
             </div>
-            <div class="mcp-dial-label">${escapeHtml(tool.name)}</div>
+            <div class="mcp-dial-label">${escapeHtml(tool.label || tool.name)}</div>
           </div>
         `;
         
@@ -1918,7 +2113,10 @@ async function initDocMenuTable() {
           item.classList.add('selected');
           setTimeout(() => {
             if (inputEl) {
-              inputEl.value = `${tool.description || tool.name}して`;
+              const displayName = tool.kind === 'saas'
+                ? `data/saas/${tool.saasFile || (tool.label || tool.name)}`
+                : (tool.description || tool.name);
+              inputEl.value = displayName;
               inputEl.focus();
             }
             dialOverlay.classList.remove('active');
@@ -2027,6 +2225,24 @@ async function initDocMenuTable() {
       if (s === 'failed') return '×';
       return '';
     }
+
+    function formatTaskTimestamp(value) {
+      if (!value) return null;
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return null;
+      try {
+        return date.toLocaleString('ja-JP', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        });
+      } catch (_) {
+        return date.toISOString();
+      }
+    }
     function mergeTask(task){
       const id = String(task.id);
       const idx = state.tasks.findIndex(x => String(x.id) === id);
@@ -2060,6 +2276,13 @@ async function initDocMenuTable() {
         task.status = 'completed';
         task.response = data && typeof data.response === 'string' ? data.response : '';
         task.result = data && data.result ? data.result : null;
+        task.serverId = data && data.taskId ? String(data.taskId) : null;
+        const assistantLogs = Array.isArray(data && data.logs) ? data.logs.map(log => String(log)) : [];
+        task.logs = assistantLogs;
+        const cacheKey = task.serverId || task.id;
+        const combinedLogs = assistantLogs.join('\n');
+        if (combinedLogs.trim()) taskLogsCache[cacheKey] = combinedLogs;
+        else delete taskLogsCache[cacheKey];
         task.updatedAt = new Date().toISOString();
       } catch(err) {
         task.status = 'failed';
@@ -2069,6 +2292,8 @@ async function initDocMenuTable() {
           task.error = String(err && err.message || err);
         }
         task.updatedAt = new Date().toISOString();
+        const errorLog = `ログ取得エラー: ${task.error}`;
+        taskLogsCache[task.serverId || task.id] = errorLog;
       }
       mergeTask(task);
       render();
@@ -2080,6 +2305,16 @@ async function initDocMenuTable() {
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
         return;
       }
+
+      document.querySelectorAll('.task-log-popup').forEach(el => el.remove());
+
+      state.tasks.forEach(t => {
+        const logsArray = Array.isArray(t.logs) ? t.logs : (typeof t.logs === 'string' ? [t.logs] : []);
+        const joined = logsArray.join('\n');
+        const cacheKey = String(t.serverId || t.id);
+        if (joined.trim()) taskLogsCache[cacheKey] = joined;
+        else delete taskLogsCache[cacheKey];
+      });
       const html = state.tasks.map(t => {
         const s = t.status || 'running';
         const cls = cssStatus(s);
@@ -2133,6 +2368,8 @@ async function initDocMenuTable() {
         const elapsed = Date.now() - createdAt;
         const progressPct = Math.max(0, Math.min(100, Math.round((elapsed / 300000) * 100)));
         const showProgress = s === 'running';
+        const startedAt = formatTaskTimestamp(t.createdAt);
+        const finishedAt = !showProgress ? formatTaskTimestamp(t.updatedAt) : null;
         
         // 経過時間に応じてステータステキストを変更
         let statusText = '';
@@ -2148,13 +2385,16 @@ async function initDocMenuTable() {
           statusText = t.error ? String(t.error) : s;
         }
         
+        const serverIdAttr = t.serverId ? escapeHtml(String(t.serverId)) : '';
+        const cacheKey = escapeHtml(String(t.serverId || t.id));
         return `
-          <div class="task-item ${cls}" data-id="${String(t.id)}">
+          <div class="task-item ${cls}" data-id="${String(t.id)}" data-server-id="${serverIdAttr}" data-cache-key="${cacheKey}">
             <button class="task-status ${cls}" data-action="open" title="詳細を表示">
               <span class="i">${icon}</span>
             </button>
             <div class="task-text">
               <div>${title}</div>
+              ${startedAt ? `<div class="tb-timestamp">開始: ${escapeHtml(startedAt)}${finishedAt ? ` / 更新: ${escapeHtml(finishedAt)}` : ''}</div>` : ''}
               <div class="tb-meta" style="font-size:.75rem;color:var(--text-weak);margin-top:3px;">
                 ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
                 ${items.join('')}
@@ -2171,6 +2411,191 @@ async function initDocMenuTable() {
         `;
       }).join('');
       listEl.innerHTML = html;
+
+      listEl.querySelectorAll('.task-item').forEach(card => {
+        if (card.dataset.logsBound === '1') return;
+        card.dataset.logsBound = '1';
+        const localId = card.getAttribute('data-id') || '';
+        const serverIdAttr = card.getAttribute('data-server-id') || '';
+        const fetchableId = serverIdAttr && serverIdAttr.trim() ? serverIdAttr.trim() : null;
+        const cacheKey = card.getAttribute('data-cache-key') || fetchableId || localId;
+        if (!cacheKey) return;
+        let popupEl = null;
+        let pollTimer = null;
+        let fetching = false;
+
+        let hideTimer = null;
+
+        const ensurePopup = () => {
+          if (!popupEl) {
+            popupEl = document.createElement('div');
+            popupEl.className = 'task-log-popup';
+            popupEl.innerHTML = '<div class="task-log-inner">ログを読み込んでいます...</div>';
+            document.body.appendChild(popupEl);
+            popupEl.addEventListener('mouseenter', () => {
+              if (hideTimer) {
+                clearTimeout(hideTimer);
+                hideTimer = null;
+              }
+            });
+            popupEl.addEventListener('mouseleave', () => {
+              hideWithDelay(60);
+            });
+          }
+          return popupEl;
+        };
+
+        const positionPopup = () => {
+          const popup = ensurePopup();
+          const rect = card.getBoundingClientRect();
+          const left = rect.left + rect.width / 2 + window.scrollX;
+          const top = Math.max(rect.top + window.scrollY - 20, 16);
+          popup.style.left = `${left}px`;
+          popup.style.top = `${top}px`;
+          return popup;
+        };
+
+        const renderLogs = (logs) => {
+          const text = typeof logs === 'string' ? logs : '';
+          const trimmed = text.trim();
+          if (!trimmed) {
+            hidePopup();
+            delete taskLogsCache[cacheKey];
+            return;
+          }
+          const popup = positionPopup();
+          const previousInner = popup.querySelector('.task-log-inner');
+          const prevScrollTop = previousInner ? previousInner.scrollTop : 0;
+          const wasPinnedBottom = previousInner ? (previousInner.scrollTop + previousInner.clientHeight >= previousInner.scrollHeight - 12) : true;
+          const html = markdownToHtml(text);
+          popup.innerHTML = `<div class="task-log-inner">${html}</div>`;
+          const newInner = popup.querySelector('.task-log-inner');
+          if (newInner) {
+            if (wasPinnedBottom) {
+              newInner.scrollTop = newInner.scrollHeight;
+            } else {
+              newInner.scrollTop = Math.min(prevScrollTop, Math.max(0, newInner.scrollHeight - newInner.clientHeight));
+            }
+          }
+          popup.classList.add('visible');
+          taskLogsCache[cacheKey] = text;
+        };
+
+        const setLoading = () => {
+          const popup = positionPopup();
+          if (!popup.classList.contains('visible')) {
+            popup.innerHTML = '<div class="task-log-inner">ログを読み込んでいます...</div>';
+            popup.classList.add('visible');
+          }
+        };
+
+        const hidePopup = () => {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+          if (popupEl) {
+            popupEl.classList.remove('visible');
+          }
+        };
+
+        const hideWithDelay = (delay = 80) => {
+          if (hideTimer) clearTimeout(hideTimer);
+          hideTimer = setTimeout(() => {
+            hideTimer = null;
+            hidePopup();
+          }, delay);
+        };
+
+        const stopPolling = () => {
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        };
+
+        const fetchLogsFromServer = async (initial = false) => {
+          if (!fetchableId || fetching) return;
+          fetching = true;
+          const previous = taskLogsCache[cacheKey] || '';
+          try {
+            const base = state.backendBase || 'http://localhost:7777';
+            const res = await fetch(`${base.replace(/\/$/, '')}/api/agent/result?id=${encodeURIComponent(fetchableId)}&logs=1`, { cache: 'no-store' });
+            if (!res.ok) {
+              const body = await res.text().catch(() => '');
+              const errorMessage = `ログ取得エラー: HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}${body ? `\n${body}` : ''}`;
+              taskLogsCache[cacheKey] = errorMessage;
+              if (popupEl && popupEl.classList.contains('visible')) {
+                renderLogs(errorMessage);
+              }
+              fetching = false;
+              return;
+            }
+            const data = await res.json();
+            const logs = data && data.task && typeof data.task.logs === 'string' ? data.task.logs : '';
+            if (logs.trim()) {
+              if (logs !== previous) {
+                taskLogsCache[cacheKey] = logs;
+                if (popupEl && popupEl.classList.contains('visible')) {
+                  renderLogs(logs);
+                }
+              } else if (initial && popupEl && popupEl.classList.contains('visible') && !previous.trim()) {
+                renderLogs(logs);
+              }
+            } else {
+              delete taskLogsCache[cacheKey];
+              if (initial && popupEl && popupEl.classList.contains('visible')) {
+                hidePopup();
+              }
+            }
+          } catch (err) {
+            const msg = err && err.message ? err.message : String(err);
+            const errorText = `ログ取得エラー: ${msg}`;
+            taskLogsCache[cacheKey] = errorText;
+            if (popupEl && popupEl.classList.contains('visible')) {
+              renderLogs(errorText);
+            }
+          } finally {
+            fetching = false;
+          }
+        };
+
+        card.addEventListener('mouseenter', async () => {
+          const cachedValue = taskLogsCache[cacheKey];
+          const hasCached = typeof cachedValue === 'string' && cachedValue.trim().length > 0;
+          if (popupEl && popupEl.classList.contains('visible') && hasCached) {
+            return;
+          }
+          if (hideTimer) {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+          }
+
+          if (hasCached) {
+            renderLogs(cachedValue);
+          } else if (fetchableId) {
+            setLoading();
+            await fetchLogsFromServer(true);
+          } else {
+            hidePopup();
+          }
+
+          if (fetchableId && !pollTimer) {
+            pollTimer = setInterval(() => fetchLogsFromServer(false), 1500);
+          }
+        });
+
+        card.addEventListener('mouseleave', () => {
+          if (popupEl && popupEl.matches(':hover')) {
+            return;
+          }
+          stopPolling();
+          hideWithDelay();
+        });
+
+        card.addEventListener('blur', () => { stopPolling(); hideWithDelay(0); });
+        card.addEventListener('focusout', () => { stopPolling(); hideWithDelay(0); });
+      });
     }
 
     function setOpen(open){
