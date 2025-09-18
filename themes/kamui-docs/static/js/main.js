@@ -1590,11 +1590,9 @@ async function initDocMenuTable() {
       const STORAGE_VERSION = 2;
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
-      const PERSIST_DELAY_MS = 350;
-      const MAX_LOG_LENGTH = 60000; // 60KBぶんだけ保持
+      const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
       const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [], saasDocs: [] };
       const taskLogsCache = Object.create(null);
-      let persistTimer = null;
       const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
       const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
       const MARKDOWN_INLINE_CODE = /`([^`]+)`/g;
@@ -1783,11 +1781,7 @@ async function initDocMenuTable() {
       }
 
       function schedulePersist(){
-        if (persistTimer) return;
-        persistTimer = setTimeout(() => {
-          persistTimer = null;
-          persistNow();
-        }, PERSIST_DELAY_MS);
+        persistNow();
       }
 
       function loadPersistedState(){
@@ -1826,10 +1820,6 @@ async function initDocMenuTable() {
       loadPersistedState();
 
       window.addEventListener('beforeunload', () => {
-        if (persistTimer) {
-          clearTimeout(persistTimer);
-          persistTimer = null;
-        }
         persistNow();
       });
 
@@ -2950,6 +2940,26 @@ async function initDocMenuTable() {
 
 // 初期化
 document.addEventListener('DOMContentLoaded', () => {
+  const forceReloadBtn = document.getElementById('forceReloadBtn');
+  if (forceReloadBtn) {
+    forceReloadBtn.addEventListener('click', () => {
+      try { sessionStorage.setItem('kamuiForceReloadAt', String(Date.now())); } catch (_) {}
+      try {
+        const { origin, pathname, search, hash } = window.location;
+        const params = new URLSearchParams(search);
+        const token = Date.now().toString(36);
+        if (params.has('forceReload')) params.delete('forceReload');
+        params.set('forceReload', token);
+        const newSearch = params.toString();
+        const finalUrl = `${origin}${pathname}${newSearch ? `?${newSearch}` : ''}${hash || ''}`;
+        window.location.replace(finalUrl);
+      } catch (err) {
+        console.warn('Force reload fallback', err);
+        window.location.reload(true);
+      }
+    });
+  }
+
   initUIFlow();
   renderPackages();
   renderServers();

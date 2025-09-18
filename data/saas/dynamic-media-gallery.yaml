@@ -1,7 +1,7 @@
 - id: dynamic-media-gallery
   category: 1
   category_name: ダッシュボード
-  title: Dynamic Media Gallery
+  title: ダイナミックメディアギャラリー
   content: ""
   custom_html: |
     <div style="background: #0f0f0f; border-radius: 12px; overflow: hidden; margin: 20px 0; min-height: 800px; position: relative;">
