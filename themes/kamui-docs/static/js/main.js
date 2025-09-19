@@ -1579,7 +1579,7 @@ async function initDocMenuTable() {
   }
 }
 
-  // 右下フローティング オーケストレーターボード（フロントのみ・ローカルストレージ永続化）
+  // 右下フローティング エージェントタスクボード（フロントのみ・ローカルストレージ永続化）
   function initTaskBoard(){
     try {
       if (window.__aiTaskBoardInit) return;
@@ -1622,7 +1622,9 @@ async function initDocMenuTable() {
         mcpTools: [],
         saasDocs: [],
         modelOptions: MODEL_OPTIONS,
-        activeModelId: MODEL_OPTIONS[0]?.id || null
+        activeModelId: MODEL_OPTIONS[0]?.id || null,
+        heatmapCollapsed: true,
+        heatmapSelection: null
       };
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
@@ -1633,50 +1635,71 @@ async function initDocMenuTable() {
       const HEATMAP_DAY_SPAN = 14;
       const HOURS_IN_DAY = 24;
       const HEATMAP_HOURS = Array.from({ length: HOURS_IN_DAY }, (_, i) => i);
-      const dayFormatter = new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric' });
-      const weekdayFormatter = new Intl.DateTimeFormat('ja-JP', { weekday: 'short' });
-      const hourFormatter = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', hour12: false });
+      const TASK_TIMEZONE = 'Asia/Tokyo';
+      const dayKeyFormatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: TASK_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      });
+      const dayLabelFormatter = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: TASK_TIMEZONE,
+        month: 'numeric',
+        day: 'numeric'
+      });
+      const weekdayFormatter = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: TASK_TIMEZONE,
+        weekday: 'short'
+      });
+      const hourExtractFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: TASK_TIMEZONE,
+        hour: '2-digit',
+        hour12: false
+      });
 
       function formatDayKey(date) {
-        return date.toISOString().slice(0, 10);
+        return dayKeyFormatter.format(date);
       }
 
       function formatDayLabel(date) {
-        return `${dayFormatter.format(date)} (${weekdayFormatter.format(date)})`;
+        return `${dayLabelFormatter.format(date)} (${weekdayFormatter.format(date)})`;
       }
 
       function formatHourLabel(hour) {
-        try {
-          const sample = new Date();
-          sample.setHours(hour, 0, 0, 0);
-          return hourFormatter.format(sample);
-        } catch (_) {
-          return `${String(hour).padStart(2, '0')}時`;
-        }
+        return `${String(hour).padStart(2, '0')}時`;
       }
 
-      function startOfDay(date) {
-        const d = new Date(date);
-        d.setHours(0, 0, 0, 0);
-        return d;
+      function deriveHourIndex(date) {
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+        try {
+          const hourStr = hourExtractFormatter.format(date);
+          const digitMatch = hourStr.match(/\d+/);
+          if (!digitMatch) return date.getUTCHours();
+          const hour = Number(digitMatch[0]);
+          if (!Number.isFinite(hour)) return date.getUTCHours();
+          return hour % 24;
+        } catch (_) {
+          return date.getUTCHours();
+        }
       }
 
       function buildHeatmapData() {
         const tasks = Array.isArray(state.tasks) ? state.tasks : [];
         const now = new Date();
-        const end = new Date(now);
-        const start = startOfDay(now);
-        start.setDate(start.getDate() - (HEATMAP_DAY_SPAN - 1));
-
         const days = [];
         const matrix = new Map();
-        for (let i = 0; i < HEATMAP_DAY_SPAN; i += 1) {
-          const dayDate = new Date(start);
-          dayDate.setDate(start.getDate() + i);
+        const dayKeySet = new Set();
+
+        for (let offset = 0; offset < HEATMAP_DAY_SPAN; offset += 1) {
+          const dayDate = new Date(now.getTime() - offset * 86400000);
           const key = formatDayKey(dayDate);
-          days.push({ key, date: dayDate });
+          if (dayKeySet.has(key)) continue;
+          dayKeySet.add(key);
+          days.push({ key, label: formatDayLabel(dayDate), timestamp: dayDate.getTime() });
           matrix.set(key, Array(HOURS_IN_DAY).fill(0));
         }
+
+        days.sort((a, b) => a.timestamp - b.timestamp);
 
         let maxCount = 0;
         let totalInRange = 0;
@@ -1686,11 +1709,11 @@ async function initDocMenuTable() {
           if (!source) return;
           const ts = new Date(source);
           if (Number.isNaN(ts.getTime())) return;
-          if (ts < start || ts > end) return;
           const key = formatDayKey(ts);
           const row = matrix.get(key);
           if (!row) return;
-          const hour = ts.getHours();
+          const hour = deriveHourIndex(ts);
+          if (hour == null) return;
           row[hour] += 1;
           totalInRange += 1;
           if (row[hour] > maxCount) maxCount = row[hour];
@@ -1734,6 +1757,17 @@ async function initDocMenuTable() {
 
       function renderHeatmap() {
         if (!heatmapEl) return;
+        if (analyticsEl) {
+          analyticsEl.classList.toggle('collapsed', !!state.heatmapCollapsed);
+        }
+        heatmapEl.classList.toggle('collapsed', !!state.heatmapCollapsed);
+        if (heatmapLegendEl) {
+          heatmapLegendEl.style.display = state.heatmapCollapsed ? 'none' : '';
+        }
+        if (state.heatmapCollapsed) {
+          heatmapEl.innerHTML = '';
+          return;
+        }
         const { days, matrix, maxCount, totalInRange } = buildHeatmapData();
         if (!days.length) {
           heatmapEl.innerHTML = '<div class="tb-heatmap-empty">データが見つかりませんでした</div>';
@@ -1746,24 +1780,177 @@ async function initDocMenuTable() {
           return;
         }
 
-        let html = `<div class="tb-heatmap-grid" style="--heatmap-days:${days.length};">`;
-        html += '<div class="tb-heatmap-cell tb-heatmap-corner">時間</div>';
-        html += days.map(dayInfo => `<div class="tb-heatmap-cell tb-heatmap-day" data-day="${dayInfo.key}">${escapeHtml(formatDayLabel(dayInfo.date))}</div>`).join('');
+        const hoursColumn = ['<div class="tb-heatmap-hours-header">時間</div>'];
+        HEATMAP_HOURS.forEach(hour => {
+          hoursColumn.push(`<div class="tb-heatmap-hour-cell" data-hour="${hour}">${escapeHtml(formatHourLabel(hour))}</div>`);
+        });
+
+        let gridHtml = `<div class="tb-heatmap-grid" style="--heatmap-days:${days.length};">`;
+        gridHtml += days.map(dayInfo => `<div class="tb-heatmap-day" data-day="${dayInfo.key}">${escapeHtml(dayInfo.label)}</div>`).join('');
 
         HEATMAP_HOURS.forEach(hour => {
-          html += `<div class="tb-heatmap-cell tb-heatmap-hour">${escapeHtml(formatHourLabel(hour))}</div>`;
           days.forEach(dayInfo => {
             const row = matrix.get(dayInfo.key) || [];
             const count = row[hour] || 0;
             const level = computeHeatLevel(count, maxCount);
-            const tooltip = `${formatDayLabel(dayInfo.date)} ${formatHourLabel(hour)}: ${count}件`;
-            html += `<div class="tb-heatmap-cell tb-heatmap-value" data-level="${level}" data-count="${count}" title="${escapeHtml(tooltip)}"><span>${count ? count : ''}</span></div>`;
+            const hourLabel = formatHourLabel(hour);
+            const tooltip = `${dayInfo.label} ${hourLabel}: ${count}件`;
+            gridHtml += `<div class="tb-heatmap-value" data-level="${level}" data-count="${count}" data-day="${escapeAttr(dayInfo.key)}" data-day-label="${escapeAttr(dayInfo.label)}" data-hour="${hour}" data-hour-label="${escapeAttr(hourLabel)}" title="${escapeHtml(tooltip)}"><span>${count ? count : ''}</span></div>`;
+          });
+        });
+        gridHtml += '</div>';
+
+        heatmapEl.innerHTML = `
+          <div class="tb-heatmap-wrapper">
+            <div class="tb-heatmap-hours-column">${hoursColumn.join('')}</div>
+            <div class="tb-heatmap-scroll">${gridHtml}</div>
+          </div>
+        `;
+        renderHeatmapLegend(maxCount);
+
+        const activeKey = state.heatmapSelection ? `${state.heatmapSelection.dayKey}:${state.heatmapSelection.hour}` : null;
+        const values = heatmapEl.querySelectorAll('.tb-heatmap-value');
+        values.forEach(cell => {
+          const dayKey = cell.getAttribute('data-day') || '';
+          const dayLabel = cell.getAttribute('data-day-label') || '';
+          const hourValue = Number(cell.getAttribute('data-hour'));
+          const hourLabel = cell.getAttribute('data-hour-label') || '';
+          const count = Number(cell.getAttribute('data-count')) || 0;
+          const cellKey = `${dayKey}:${hourValue}`;
+          const isActive = activeKey === cellKey;
+          cell.classList.toggle('selected', isActive);
+          cell.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+          cell.setAttribute('role', 'button');
+          cell.setAttribute('tabindex', count > 0 ? '0' : '-1');
+          const fallbackHour = Number.isInteger(hourValue) ? formatHourLabel(hourValue) : '';
+          const ariaLabelParts = [];
+          if (dayLabel || dayKey) ariaLabelParts.push(dayLabel || dayKey);
+          if (hourLabel || fallbackHour) ariaLabelParts.push(hourLabel || fallbackHour);
+          ariaLabelParts.push(`${count}件`);
+          cell.setAttribute('aria-label', ariaLabelParts.join(' '));
+          const activate = (evt) => {
+            evt.preventDefault();
+            toggleHeatmapSelection(dayKey, hourValue, dayLabel, hourLabel, count);
+          };
+          cell.addEventListener('click', activate);
+          cell.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Enter' || evt.key === ' ') {
+              activate(evt);
+            }
           });
         });
 
-        html += '</div>';
-        heatmapEl.innerHTML = html;
-        renderHeatmapLegend(maxCount);
+        requestAnimationFrame(() => {
+          const scrollWrap = heatmapEl.querySelector('.tb-heatmap-scroll');
+          if (!scrollWrap) return;
+          scrollWrap.scrollLeft = scrollWrap.scrollWidth;
+        });
+      }
+
+      function updateHeatmapToggleLabel() {
+        if (!heatmapToggleEl) return;
+        heatmapToggleEl.textContent = state.heatmapCollapsed ? 'ヒートマップを表示' : 'ヒートマップを隠す';
+        heatmapToggleEl.setAttribute('aria-expanded', state.heatmapCollapsed ? 'false' : 'true');
+      }
+
+      function setHeatmapCollapsed(nextValue) {
+        const next = !!nextValue;
+        if (state.heatmapCollapsed === next) return;
+        state.heatmapCollapsed = next;
+        updateHeatmapToggleLabel();
+        renderHeatmap();
+        schedulePersist();
+      }
+
+      function setHeatmapSelection(nextSelection) {
+        let normalized = null;
+        if (nextSelection && typeof nextSelection === 'object') {
+          const { dayKey, hour, dayLabel, hourLabel } = nextSelection;
+          if (typeof dayKey === 'string' && dayKey.trim() !== '' && Number.isFinite(Number(hour))) {
+            const hourNum = Number(hour);
+            if (Number.isInteger(hourNum) && hourNum >= 0 && hourNum < 24) {
+              normalized = {
+                dayKey: dayKey.trim(),
+                hour: hourNum,
+                dayLabel: typeof dayLabel === 'string' ? dayLabel : null,
+                hourLabel: typeof hourLabel === 'string' ? hourLabel : null
+              };
+            }
+          }
+        }
+        const prevKey = state.heatmapSelection ? `${state.heatmapSelection.dayKey}:${state.heatmapSelection.hour}` : null;
+        const nextKey = normalized ? `${normalized.dayKey}:${normalized.hour}` : null;
+        if (prevKey === nextKey) {
+          if (!normalized && !state.heatmapSelection) return;
+          if (normalized && state.heatmapSelection) {
+            // Even if the key matches, update labels in case they changed
+            state.heatmapSelection = normalized;
+            schedulePersist();
+            return;
+          }
+        }
+        state.heatmapSelection = normalized;
+        render();
+        schedulePersist();
+      }
+
+      function clearHeatmapSelection() {
+        if (!state.heatmapSelection) return;
+        state.heatmapSelection = null;
+        render();
+        schedulePersist();
+      }
+
+      function toggleHeatmapSelection(dayKey, hour, dayLabel, hourLabel, count) {
+        if (typeof dayKey !== 'string' || dayKey.trim() === '') {
+          clearHeatmapSelection();
+          setHeatmapCollapsed(true);
+          return;
+        }
+        const hourNum = Number(hour);
+        if (!Number.isInteger(hourNum) || hourNum < 0 || hourNum >= 24) {
+          clearHeatmapSelection();
+          setHeatmapCollapsed(true);
+          return;
+        }
+        const key = `${dayKey.trim()}:${hourNum}`;
+        const activeKey = state.heatmapSelection ? `${state.heatmapSelection.dayKey}:${state.heatmapSelection.hour}` : null;
+        if (activeKey === key) {
+          clearHeatmapSelection();
+          setHeatmapCollapsed(true);
+          return;
+        }
+        if (Number(count) <= 0) {
+          clearHeatmapSelection();
+          setHeatmapCollapsed(true);
+          return;
+        }
+        setHeatmapSelection({
+          dayKey: dayKey.trim(),
+          hour: hourNum,
+          dayLabel: typeof dayLabel === 'string' && dayLabel ? dayLabel : null,
+          hourLabel: typeof hourLabel === 'string' && hourLabel ? hourLabel : null
+        });
+        setHeatmapCollapsed(true);
+      }
+
+      function getTaskReferenceDate(task) {
+        if (!task) return null;
+        const source = task.createdAt || task.updatedAt || task.endedAt;
+        if (!source) return null;
+        const date = new Date(source);
+        if (Number.isNaN(date.getTime())) return null;
+        return date;
+      }
+
+      function matchesHeatmapSelection(task) {
+        if (!state.heatmapSelection) return true;
+        const date = getTaskReferenceDate(task);
+        if (!date) return false;
+        const dayKey = formatDayKey(date);
+        if (dayKey !== state.heatmapSelection.dayKey) return false;
+        const hour = deriveHourIndex(date);
+        return hour === state.heatmapSelection.hour;
       }
 
       function formatInlineMarkdown(text) {
@@ -1945,6 +2132,13 @@ async function initDocMenuTable() {
             logs: logsPayload,
             backendBase: state.backendBase,
             activeModelId: state.activeModelId,
+            heatmapCollapsed: !!state.heatmapCollapsed,
+            heatmapSelection: state.heatmapSelection ? {
+              dayKey: state.heatmapSelection.dayKey,
+              hour: state.heatmapSelection.hour,
+              dayLabel: state.heatmapSelection.dayLabel,
+              hourLabel: state.heatmapSelection.hourLabel
+            } : null,
             persistedAt: new Date().toISOString()
           };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -1982,6 +2176,20 @@ async function initDocMenuTable() {
             Object.entries(saved.logs).forEach(([key, value]) => {
               if (typeof value === 'string') taskLogsCache[key] = value;
             });
+          }
+          if (typeof saved.heatmapCollapsed === 'boolean') {
+            state.heatmapCollapsed = saved.heatmapCollapsed;
+          }
+          if (saved.heatmapSelection && typeof saved.heatmapSelection === 'object') {
+            const { dayKey, hour, dayLabel, hourLabel } = saved.heatmapSelection;
+            if (typeof dayKey === 'string' && dayKey && Number.isInteger(Number(hour))) {
+              state.heatmapSelection = {
+                dayKey,
+                hour: Number(hour),
+                dayLabel: typeof dayLabel === 'string' ? dayLabel : null,
+                hourLabel: typeof hourLabel === 'string' ? hourLabel : null
+              };
+            }
           }
           if (typeof saved.activeModelId === 'string' && saved.activeModelId) {
             state.activeModelId = saved.activeModelId;
@@ -2067,8 +2275,8 @@ async function initDocMenuTable() {
     // 要素生成
     const toggleBtn = document.createElement('button');
     toggleBtn.className = 'taskboard-toggle';
-    toggleBtn.setAttribute('aria-label', 'オーケストレーターを開く');
-    toggleBtn.setAttribute('title', 'オーケストレーター');
+    toggleBtn.setAttribute('aria-label', 'エージェントタスクを開く');
+    toggleBtn.setAttribute('title', 'エージェントタスク');
     // SVGイルカアイコン（淡い水色）
     toggleBtn.innerHTML = `
       <svg class="bot-icon" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -2091,16 +2299,14 @@ async function initDocMenuTable() {
 
     panel.innerHTML = `
       <div class="taskboard-header">
-        <div class="tb-title">オーケストレーター</div>
+        <div class="tb-title">エージェントタスク</div>
+        <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false">ヒートマップを表示</button>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
         </div>
       </div>
       <div class="taskboard-analytics">
-        <div class="tb-heatmap-header">
-          <div class="tb-heatmap-title">タスクヒートマップ</div>
-          <div class="tb-heatmap-legend" id="taskboardHeatmapLegend"></div>
-        </div>
+        <div class="tb-heatmap-legend" id="taskboardHeatmapLegend"></div>
         <div class="taskboard-heatmap" id="taskboardHeatmap" role="img" aria-label="直近14日間の時間帯別タスク数ヒートマップ"></div>
       </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
@@ -2119,6 +2325,8 @@ async function initDocMenuTable() {
     const listEl = panel.querySelector('#taskboardList');
     const heatmapEl = panel.querySelector('#taskboardHeatmap');
     const heatmapLegendEl = panel.querySelector('#taskboardHeatmapLegend');
+    const heatmapToggleEl = panel.querySelector('#taskboardHeatmapToggle');
+    const analyticsEl = panel.querySelector('.taskboard-analytics');
     const inputEl = panel.querySelector('#taskboardInput');
     const sendEl  = panel.querySelector('#taskboardSend');
     const hideEl  = panel.querySelector('.tb-hide');
@@ -2129,6 +2337,13 @@ async function initDocMenuTable() {
       e.stopPropagation();
       showModelDial();
     });
+    if (heatmapToggleEl) {
+      heatmapToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        setHeatmapCollapsed(!state.heatmapCollapsed);
+      });
+      updateHeatmapToggleLabel();
+    }
     // Create a global dial overlay for MCP tools
     let dialOverlay = document.getElementById('mcpDialOverlay');
     if (!dialOverlay) {
@@ -2727,7 +2942,8 @@ async function initDocMenuTable() {
           day: '2-digit',
           hour: '2-digit',
           minute: '2-digit',
-          hour12: false
+          hour12: false,
+          timeZone: TASK_TIMEZONE
         });
       } catch (_) {
         return date.toISOString();
@@ -2846,7 +3062,27 @@ async function initDocMenuTable() {
           delete taskLogsCache[cacheKey];
         }
       });
-      const html = state.tasks.map(t => {
+      const filterNotice = (() => {
+        if (!state.heatmapSelection) return '';
+        const parts = [];
+        if (state.heatmapSelection.dayLabel) parts.push(state.heatmapSelection.dayLabel);
+        else parts.push(state.heatmapSelection.dayKey);
+        const hourLabel = state.heatmapSelection.hourLabel || formatHourLabel(state.heatmapSelection.hour);
+        parts.push(hourLabel);
+        const label = parts.join(' / ');
+        return `
+          <div class="tb-filter-notice" data-role="heatmap-filter">
+            <span class="tb-filter-label">選択中: ${escapeHtml(label)}</span>
+            <button type="button" class="tb-filter-clear" data-action="clear-heatmap-filter" aria-label="選択をクリア">×</button>
+          </div>
+        `;
+      })();
+
+      const tasksToRender = (state.heatmapSelection
+        ? state.tasks.filter(matchesHeatmapSelection)
+        : state.tasks.slice());
+
+      const cardsHtml = tasksToRender.map(t => {
         const s = t.status || 'running';
         const cls = cssStatus(s);
         const icon = iconFor(s);
@@ -2959,9 +3195,29 @@ async function initDocMenuTable() {
           </div>
         `;
       }).join('');
-      listEl.innerHTML = html;
+
+      let finalHtml = '';
+      if (filterNotice) finalHtml += filterNotice;
+      if (tasksToRender.length) {
+        finalHtml += cardsHtml;
+      } else if (state.heatmapSelection) {
+        finalHtml += '<div class="tb-empty">選択した時間帯に一致するタスクが見つかりません。ヒートマップをクリックし直すか、フィルターを解除してください。</div>';
+      } else {
+        finalHtml += '<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>';
+      }
+
+      listEl.innerHTML = finalHtml;
 
       renderHeatmap();
+
+      listEl.querySelectorAll('[data-action="clear-heatmap-filter"]').forEach(btn => {
+        if (btn.dataset.bound === '1') return;
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          clearHeatmapSelection();
+        });
+      });
 
       listEl.querySelectorAll('.task-item').forEach(card => {
         if (card.dataset.logsBound === '1') return;

@@ -97,6 +97,12 @@
         display: flex;
         gap: 8px;
       }
+      .info-toggle {
+        margin-top: 16px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
       .toggle-btn {
         padding: 6px 10px;
         border-radius: 6px;
@@ -108,6 +114,39 @@
       .toggle-btn.active {
         background: var(--link);
         color: #fff;
+      }
+      .info-btn {
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--text);
+        cursor: pointer;
+        font-size: 0.82rem;
+        transition: background 0.2s ease, border 0.2s ease, color 0.2s ease;
+      }
+      .info-btn:hover {
+        border-color: var(--link);
+        color: var(--link);
+      }
+      .info-btn.active {
+        background: var(--link);
+        color: #fff;
+        border-color: color-mix(in srgb, var(--link) 65%, #ffffff 35%);
+      }
+      .info-sections {
+        margin-top: 16px;
+      }
+      .info-section {
+        display: none;
+      }
+      .info-section.active {
+        display: block;
+      }
+      .info-heading {
+        margin: 0 0 12px 0;
+        font-size: 1.05rem;
+        color: var(--link);
       }
       .directory-stats {
         margin-top: 16px;
@@ -308,113 +347,127 @@
           </div>
         </div>
         
-        <div class="directory-graph-info">
+      <div class="directory-graph-info">
           <div class="view-toggle">
-            <button class="toggle-btn active" id="toggle-color-mode">色で表示</button>
-            <button class="toggle-btn" id="toggle-media-mode">メディアで表示</button>
+            <button type="button" class="toggle-btn" id="toggle-color-mode">色で表示</button>
+            <button type="button" class="toggle-btn active" id="toggle-media-mode">メディアで表示</button>
           </div>
 
-          <div class="node-preview">
-            <h3>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="2" x2="12" y2="6"></line>
-                <line x1="12" y1="18" x2="12" y2="22"></line>
-                <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>
-                <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>
-              </svg>
-              プレビュー
-            </h3>
-            <div class="node-preview-meta">
-              <div><span class="meta-label">名前</span><span id="node-preview-name">-</span></div>
-              <div><span class="meta-label">種別</span><span id="node-preview-type">-</span></div>
-              <div><span class="meta-label">パス</span><code id="node-preview-path">-</code></div>
-              <div><span class="meta-label">サイズ</span><span id="node-preview-size">-</span></div>
-            </div>
-            <div class="node-preview-body" id="node-preview-body">
-              <div class="preview-placeholder">ノードにカーソルを合わせるとプレビューを表示します。</div>
-            </div>
+          <div class="info-toggle">
+            <button type="button" class="info-btn active" data-target="preview" aria-pressed="true">プレビュー</button>
+            <button type="button" class="info-btn" data-target="controls" aria-pressed="false">操作方法</button>
+            <button type="button" class="info-btn" data-target="stats" aria-pressed="false">統計情報</button>
           </div>
 
-          <h3>操作方法</h3>
-          <ul>
-            <li><strong>マウス</strong>
-              <ul>
-                <li>ドラッグ: 視点変更</li>
-                <li>ホイール: ズーム</li>
-                <li>ダブルクリック: リセット</li>
-              </ul>
-            </li>
-            <li><strong>ノード</strong>
-              <ul>
-                <li>クリック: 詳細表示</li>
-                <li>ドラッグ: 移動</li>
-                <li>ホバー: 名前表示</li>
-              </ul>
-            </li>
-            <li><strong>キーボード</strong>
-              <ul>
-                <li>R: 再配置</li>
-                <li>C: カメラリセット</li>
-                <li>F: 全体フィット</li>
-              </ul>
-            </li>
-          </ul>
+          <div class="info-sections">
+            <div class="info-section active" data-section="preview">
+              <div class="node-preview">
+                <h3>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="2" x2="12" y2="6"></line>
+                    <line x1="12" y1="18" x2="12" y2="22"></line>
+                    <line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line>
+                    <line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line>
+                  </svg>
+                  プレビュー
+                </h3>
+                <div class="node-preview-meta">
+                  <div><span class="meta-label">名前</span><span id="node-preview-name">-</span></div>
+                  <div><span class="meta-label">種別</span><span id="node-preview-type">-</span></div>
+                  <div><span class="meta-label">パス</span><code id="node-preview-path">-</code></div>
+                  <div><span class="meta-label">サイズ</span><span id="node-preview-size">-</span></div>
+                </div>
+                <div class="node-preview-body" id="node-preview-body">
+                  <div class="preview-placeholder">ノードにカーソルを合わせるとプレビューを表示します。</div>
+                </div>
+              </div>
+            </div>
 
-          <div class="directory-stats">
-            <h3>統計情報</h3>
-            <div id="directory-stats-content">
-              <div class="stat-item">
-                <span class="stat-label">フォルダ数:</span>
-                <span class="stat-value" id="folder-count">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">ファイル数:</span>
-                <span class="stat-value" id="file-count">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">画像:</span>
-                <span class="stat-value" id="image-count">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">動画:</span>
-                <span class="stat-value" id="video-count">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">音声:</span>
-                <span class="stat-value" id="audio-count">-</span>
-              </div>
-              <div class="stat-item">
-                <span class="stat-label">HTML:</span>
-                <span class="stat-value" id="html-count">-</span>
-              </div>
+            <div class="info-section" data-section="controls" hidden>
+              <h3 class="info-heading">操作方法</h3>
+              <ul>
+                <li><strong>マウス</strong>
+                  <ul>
+                    <li>ドラッグ: 視点変更</li>
+                    <li>ホイール: ズーム</li>
+                    <li>ダブルクリック: リセット</li>
+                  </ul>
+                </li>
+                <li><strong>ノード</strong>
+                  <ul>
+                    <li>クリック: 詳細表示</li>
+                    <li>ドラッグ: 移動</li>
+                    <li>ホバー: 名前表示</li>
+                  </ul>
+                </li>
+                <li><strong>キーボード</strong>
+                  <ul>
+                    <li>R: 再配置</li>
+                    <li>C: カメラリセット</li>
+                    <li>F: 全体フィット</li>
+                  </ul>
+                </li>
+              </ul>
             </div>
-          </div>
 
-          <div class="node-legend">
-            <div class="legend-item">
-              <div class="legend-color" style="background: #ff6b6b;"></div>
-              <span class="legend-label">ルート</span>
-            </div>
-            <div class="legend-item">
-              <div class="legend-color" style="background: #4ecdc4;"></div>
-              <span class="legend-label">フォルダ</span>
-            </div>
-            <div class="legend-item">
-              <div class="legend-color" style="background: #ffa502;"></div>
-              <span class="legend-label">画像</span>
-            </div>
-            <div class="legend-item">
-              <div class="legend-color" style="background: #6c5ce7;"></div>
-              <span class="legend-label">動画</span>
-            </div>
-            <div class="legend-item">
-              <div class="legend-color" style="background: #feca57;"></div>
-              <span class="legend-label">音声</span>
-            </div>
-            <div class="legend-item">
-              <div class="legend-color" style="background: #dfe6e9;"></div>
-              <span class="legend-label">HTML</span>
+            <div class="info-section" data-section="stats" hidden>
+              <div class="directory-stats">
+                <h3 class="info-heading">統計情報</h3>
+                <div id="directory-stats-content">
+                  <div class="stat-item">
+                    <span class="stat-label">フォルダ数:</span>
+                    <span class="stat-value" id="folder-count">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">ファイル数:</span>
+                    <span class="stat-value" id="file-count">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">画像:</span>
+                    <span class="stat-value" id="image-count">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">動画:</span>
+                    <span class="stat-value" id="video-count">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">音声:</span>
+                    <span class="stat-value" id="audio-count">-</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">HTML:</span>
+                    <span class="stat-value" id="html-count">-</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="node-legend">
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #ff6b6b;"></div>
+                  <span class="legend-label">ルート</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #4ecdc4;"></div>
+                  <span class="legend-label">フォルダ</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #ffa502;"></div>
+                  <span class="legend-label">画像</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #6c5ce7;"></div>
+                  <span class="legend-label">動画</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #feca57;"></div>
+                  <span class="legend-label">音声</span>
+                </div>
+                <div class="legend-item">
+                  <div class="legend-color" style="background: #dfe6e9;"></div>
+                  <span class="legend-label">HTML</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -757,6 +810,34 @@
         const previewPathEl = sectionRoot.querySelector('#node-preview-path');
         const previewSizeEl = sectionRoot.querySelector('#node-preview-size');
         const previewBodyEl = sectionRoot.querySelector('#node-preview-body');
+        const infoButtons = sectionRoot ? Array.from(sectionRoot.querySelectorAll('.info-btn')) : [];
+        const infoSections = sectionRoot ? Array.from(sectionRoot.querySelectorAll('.info-section')) : [];
+        const setActiveInfoSection = (targetId) => {
+          infoButtons.forEach(btn => {
+            const isActive = btn.dataset.target === targetId;
+            btn.classList.toggle('active', isActive);
+            btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+          });
+          infoSections.forEach(section => {
+            const isActive = section.dataset.section === targetId;
+            section.classList.toggle('active', isActive);
+            section.hidden = !isActive;
+          });
+        };
+        if (infoButtons.length && infoSections.length) {
+          infoButtons.forEach(btn => {
+            if (btn.dataset.bound === '1') return;
+            btn.dataset.bound = '1';
+            btn.addEventListener('click', (event) => {
+              event.preventDefault();
+              const target = btn.dataset.target;
+              if (target) setActiveInfoSection(target);
+            });
+          });
+          const initialTarget = infoButtons.find(btn => btn.classList.contains('active'))?.dataset.target
+            || infoButtons[0]?.dataset.target;
+          if (initialTarget) setActiveInfoSection(initialTarget);
+        }
         const previewCache = new Map();
         let currentPreviewKey = null;
         let previewFetchToken = 0;
@@ -1203,12 +1284,11 @@
         // 表示モード切り替え
         const colorBtn = document.getElementById('toggle-color-mode');
         const mediaBtn = document.getElementById('toggle-media-mode');
-        let showMediaTexture = false;
+        let showMediaTexture = true;
         const applyActive = () => {
-          colorBtn.classList.toggle('active', !showMediaTexture);
-          mediaBtn.classList.toggle('active', showMediaTexture);
+          if (colorBtn) colorBtn.classList.toggle('active', !showMediaTexture);
+          if (mediaBtn) mediaBtn.classList.toggle('active', showMediaTexture);
         };
-        applyActive();
         
         // 画像/動画ノードにテクスチャ適用
         const loader = new Image();
@@ -1240,6 +1320,11 @@
           });
           // 再描画
           Graph.refresh();
+        }
+        if (showMediaTexture) {
+          setMediaTextures(true);
+        } else {
+          applyActive();
         }
         mediaBtn?.addEventListener('click', () => setMediaTextures(true));
         colorBtn?.addEventListener('click', () => setMediaTextures(false));
