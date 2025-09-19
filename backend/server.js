@@ -280,7 +280,10 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         heartbeatIntervalId: null,
         resultText: null,
         stdoutBytes: 0,
-        stderrBytes: 0
+        stderrBytes: 0,
+        provider: 'claude',
+        model: 'claude-headless',
+        type: 'claude_cli'
     };
     tasks[id] = task;
     console.log(`[TASK ${id}] Child PID: ${child.pid}`);
@@ -392,6 +395,328 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
     return task;
 }
 
+function normalizeBooleanEnv(value) {
+    if (value == null) return false;
+    if (typeof value === 'boolean') return value;
+    const lowered = String(value).trim().toLowerCase();
+    return lowered === '1' || lowered === 'true' || lowered === 'yes' || lowered === 'on';
+}
+
+function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides, extraArgs, skipGitCheck }) {
+    if (!prompt || !String(prompt).trim()) {
+        throw new Error('Prompt is required for Codex task');
+    }
+
+    const id = createTaskId();
+    const codexArgs = ['exec', '--json'];
+
+    const resolvedModel = (model || process.env.CODEX_MODEL || process.env.CODEX_DEFAULT_MODEL || '').trim();
+    if (resolvedModel) {
+        codexArgs.push('--model', resolvedModel);
+    }
+
+    const resolvedProfile = profile || process.env.CODEX_PROFILE;
+    if (resolvedProfile) {
+        codexArgs.push('--profile', resolvedProfile);
+    }
+
+    const defaultSandbox = process.env.CODEX_SANDBOX || process.env.CODEX_DEFAULT_SANDBOX || 'danger-full-access';
+    const resolvedSandbox = sandbox || defaultSandbox;
+    if (resolvedSandbox) {
+        codexArgs.push('--sandbox', resolvedSandbox);
+    }
+
+    const effectiveSkipGit = skipGitCheck !== undefined
+        ? normalizeBooleanEnv(skipGitCheck)
+        : normalizeBooleanEnv(process.env.CODEX_SKIP_GIT_CHECK);
+    if (effectiveSkipGit) {
+        codexArgs.push('--skip-git-repo-check');
+    }
+
+    const configList = Array.isArray(configOverrides)
+        ? configOverrides
+        : (typeof configOverrides === 'string' && configOverrides.trim()
+            ? configOverrides.split(/[;,\n]+/).map(entry => entry.trim()).filter(Boolean)
+            : []);
+    if (!configList.length && typeof process.env.CODEX_CONFIG_OVERRIDES === 'string') {
+        const envOverrides = process.env.CODEX_CONFIG_OVERRIDES.split(/[;,\n]+/).map(entry => entry.trim()).filter(Boolean);
+        configList.push(...envOverrides);
+    }
+    for (const entry of configList) {
+        codexArgs.push('-c', entry);
+    }
+
+    if (extraArgs) {
+        if (Array.isArray(extraArgs)) {
+            extraArgs.filter(arg => typeof arg === 'string' && arg.trim() !== '').forEach(arg => {
+                codexArgs.push(arg);
+            });
+        } else if (typeof extraArgs === 'object') {
+            // Convert key-value object into CLI flags
+            Object.entries(extraArgs).forEach(([key, value]) => {
+                if (!key) return;
+                codexArgs.push(`--${key}`);
+                if (value !== null && value !== undefined && value !== '') {
+                    codexArgs.push(String(value));
+                }
+            });
+        }
+    }
+
+    codexArgs.push(String(prompt));
+
+    const quoteArg = (arg) => {
+        if (arg === undefined || arg === null) return '';
+        const str = String(arg);
+        return /\s/.test(str) ? `'${str.replace(/'/g, "'\\''")}'` : str;
+    };
+
+    const displayCmd = `codex ${codexArgs.map(quoteArg).join(' ')}`;
+    console.log(`[CODEX ${id}] Starting: ${displayCmd}`);
+
+    const child = spawn('codex', codexArgs, {
+        env: { ...process.env },
+        cwd: cwd && typeof cwd === 'string' ? cwd : process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    const nowIso = new Date().toISOString();
+    const task = {
+        id,
+        status: 'running',
+        prompt: String(prompt),
+        command: displayCmd,
+        pid: child.pid,
+        proc: child,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        endedAt: null,
+        exitCode: null,
+        logs: [],
+        urls: [],
+        files: [],
+        monitor: null,
+        stdout: '',
+        stderr: '',
+        resultMeta: null,
+        lastActivityAt: nowIso,
+        durationMs: null,
+        heartbeatIntervalId: null,
+        resultText: null,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        provider: 'codex',
+        model: resolvedModel || null,
+        type: 'codex_exec'
+    };
+
+    tasks[id] = task;
+
+    const codexContext = {
+        buffer: '',
+        events: [],
+        assistantMessages: [],
+        reasoning: [],
+        lastTokenInfo: null,
+        errors: []
+    };
+
+    let resolveCompletion;
+    let rejectCompletion;
+    task.completionPromise = new Promise((resolve, reject) => {
+        resolveCompletion = resolve;
+        rejectCompletion = reject;
+    });
+
+    const pushLog = (text) => {
+        if (!text) return;
+        appendAndParseOutput(task, `${text}\n`);
+    };
+
+    const processEvent = (event) => {
+        codexContext.events.push(event);
+        const msg = event && event.msg ? event.msg : null;
+        if (!msg || typeof msg !== 'object') {
+            return;
+        }
+
+        const extractText = (payload) => {
+            if (!payload) return '';
+            if (typeof payload === 'string') return payload;
+            if (Array.isArray(payload)) {
+                return payload.map(extractText).filter(Boolean).join('\n');
+            }
+            if (typeof payload === 'object') {
+                if (typeof payload.text === 'string') return payload.text;
+                if (Array.isArray(payload.content)) return extractText(payload.content);
+                if (typeof payload.message === 'string') return payload.message;
+            }
+            return '';
+        };
+
+        switch (msg.type) {
+            case 'agent_message': {
+                const text = extractText(msg.message || msg.text || msg);
+                if (text) {
+                    codexContext.assistantMessages.push(text);
+                    pushLog(`[CODEX CHAT] ${text}`);
+                }
+                break;
+            }
+            case 'agent_reasoning':
+            case 'agent_thought':
+            case 'agent_reasoning_section_break': {
+                const text = extractText(msg.text || msg.message || msg);
+                if (text) {
+                    codexContext.reasoning.push(text);
+                    pushLog(`[CODEX REASONING] ${text}`);
+                }
+                break;
+            }
+            case 'task_started': {
+                pushLog('[CODEX] Task started');
+                break;
+            }
+            case 'command_started': {
+                const text = [`Command: ${msg.command || ''}`, msg.description ? `Description: ${msg.description}` : null].filter(Boolean).join(' | ');
+                if (text) pushLog(`[CODEX COMMAND] ${text}`);
+                break;
+            }
+            case 'command_output': {
+                const text = extractText(msg.output || msg.text || msg);
+                if (text) pushLog(`[CODEX OUTPUT] ${text}`);
+                break;
+            }
+            case 'command_completed': {
+                const text = extractText(msg.summary || msg.output || msg);
+                if (text) pushLog(`[CODEX COMMAND DONE] ${text}`);
+                break;
+            }
+            case 'token_count': {
+                codexContext.lastTokenInfo = msg.info || msg;
+                break;
+            }
+            case 'error': {
+                const text = extractText(msg.message || msg);
+                if (text) {
+                    codexContext.errors.push(text);
+                    pushLog(`[CODEX ERROR] ${text}`);
+                }
+                break;
+            }
+            case 'result': {
+                const text = extractText(msg.output || msg.text || msg.result || msg);
+                if (text) {
+                    codexContext.assistantMessages.push(text);
+                    pushLog(`[CODEX RESULT] ${text}`);
+                }
+                break;
+            }
+            default: {
+                const text = extractText(msg.message || msg.text);
+                if (text) {
+                    pushLog(`[CODEX ${msg.type}] ${text}`);
+                }
+            }
+        }
+    };
+
+    const processBuffer = () => {
+        let newlineIndex;
+        while ((newlineIndex = codexContext.buffer.indexOf('\n')) !== -1) {
+            const line = codexContext.buffer.slice(0, newlineIndex).trim();
+            codexContext.buffer = codexContext.buffer.slice(newlineIndex + 1);
+            if (!line) continue;
+            try {
+                const event = JSON.parse(line);
+                processEvent(event);
+            } catch (err) {
+                pushLog(line);
+            }
+        }
+    };
+
+    child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        task.stdout += text;
+        task.stdoutBytes += Buffer.byteLength(chunk);
+        codexContext.buffer += text;
+        processBuffer();
+    });
+
+    child.stdout.on('end', () => {
+        if (codexContext.buffer.trim()) {
+            const leftover = codexContext.buffer.trim();
+            try {
+                const event = JSON.parse(leftover);
+                processEvent(event);
+            } catch (err) {
+                pushLog(leftover);
+            }
+        }
+        codexContext.buffer = '';
+    });
+
+    child.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        task.stderr += text;
+        task.stderrBytes += Buffer.byteLength(chunk);
+        pushLog(`[CODEX STDERR] ${text.trim()}`);
+    });
+
+    child.on('close', (code) => {
+        console.log(`[CODEX ${id}] Process closed with code: ${code}`);
+        task.status = code === 0 ? 'completed' : 'failed';
+        task.exitCode = code;
+        task.endedAt = new Date().toISOString();
+        task.updatedAt = task.endedAt;
+        if (task.createdAt) {
+            task.durationMs = new Date(task.endedAt).getTime() - new Date(task.createdAt).getTime();
+        }
+
+        const resultText = codexContext.assistantMessages.join('\n').trim();
+        if (resultText) {
+            task.resultText = resultText;
+        }
+
+        const meta = {
+            provider: 'codex',
+            model: resolvedModel || null,
+            profile: resolvedProfile || null,
+            sandbox: resolvedSandbox || null,
+            token_usage: codexContext.lastTokenInfo || null,
+            errors: codexContext.errors.length ? codexContext.errors : undefined,
+            reasoning: codexContext.reasoning.length ? codexContext.reasoning : undefined,
+            exit_code: code
+        };
+        task.resultMeta = meta;
+
+        if (code === 0) {
+            resolveCompletion({
+                resultText,
+                meta,
+                logs: Array.isArray(task.logs) ? task.logs.slice(-500) : []
+            });
+        } else {
+            const err = new Error(`Codex exited with code ${code}`);
+            codexContext.errors.push(err.message);
+            rejectCompletion(err);
+        }
+    });
+
+    child.on('error', (err) => {
+        console.log(`[CODEX ${id}] Process error: ${err.message}`);
+        pushLog(`[CODEX ERROR] ${err.message}`);
+        task.status = 'failed';
+        task.exitCode = -1;
+        task.endedAt = new Date().toISOString();
+        task.updatedAt = task.endedAt;
+        rejectCompletion(err);
+    });
+
+    return task;
+}
+
 function startMonitor(task, { intervalSec = 10, callbackUrl } = {}) {
     if (!task || task.monitor) return task;
     const intervalMs = Math.max(1, Number(intervalSec)) * 1000;
@@ -467,6 +792,9 @@ function publicTaskView(task, includeLogs = false) {
         files: task.files,
         lastActivityAt: task.lastActivityAt,
         durationMs: task.durationMs,
+        provider: task.provider || null,
+        model: task.model || null,
+        type: task.type || null,
         numTurns: task.resultMeta ? (task.resultMeta.num_turns ?? task.resultMeta.numTurns ?? null) : null,
         resultText: task.resultText,
         resultMeta: includeLogs ? task.resultMeta : undefined,
@@ -1215,6 +1543,58 @@ const server = http.createServer((req, res) => {
                 }
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+    } else if (requestUrl.pathname === '/api/codex/chat' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk.toString(); });
+        req.on('end', async () => {
+            try {
+                const payload = body ? JSON.parse(body) : {};
+                const prompt = payload.prompt || '';
+                if (!prompt || !prompt.trim()) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'Prompt is required' }));
+                    return;
+                }
+
+                const task = startCodexTask({
+                    prompt,
+                    model: payload.model,
+                    profile: payload.profile,
+                    sandbox: payload.sandbox,
+                    cwd: payload.cwd,
+                    configOverrides: payload.configOverrides,
+                    extraArgs: payload.extraArgs,
+                    skipGitCheck: payload.skipGitCheck
+                });
+
+                try {
+                    const result = await task.completionPromise;
+                    res.writeHead(200);
+                    res.end(JSON.stringify({
+                        taskId: task.id,
+                        prompt,
+                        response: result && typeof result.resultText === 'string' ? result.resultText : '',
+                        logs: Array.isArray(result && result.logs) ? result.logs : [],
+                        result: {
+                            result: result && typeof result.resultText === 'string' ? result.resultText : '',
+                            provider: 'codex',
+                            model: (result && result.meta && result.meta.model) || task.model || null,
+                            token_usage: result && result.meta ? result.meta.token_usage || null : null,
+                            errors: result && result.meta && Array.isArray(result.meta.errors) ? result.meta.errors : null,
+                            meta: result ? result.meta : null
+                        }
+                    }));
+                } catch (err) {
+                    console.error('[CODEX CHAT] Error awaiting completion:', err);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: err.message || String(err), taskId: task.id }));
+                }
+            } catch (err) {
+                console.error('[CODEX CHAT] Error:', err);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: err.message || 'Invalid request' }));
             }
         });
     } else if (requestUrl.pathname === '/api/claude/health' && req.method === 'GET') {

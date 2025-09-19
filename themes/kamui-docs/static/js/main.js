@@ -1591,12 +1591,180 @@ async function initDocMenuTable() {
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
-      const state = { open: false, tasks: [], lastFetchAt: null, backendBase: 'http://localhost:7777', mcpTools: [], saasDocs: [] };
+      const MODEL_OPTIONS = [
+        {
+          id: 'claude',
+          label: 'Claude CLI',
+          shortLabel: 'Claude',
+          description: 'Anthropic Claude コードエージェント (claude --output-format stream-json)',
+          endpoint: '/api/claude/chat',
+          provider: 'anthropic'
+        },
+        {
+          id: 'codex',
+          label: 'Codex CLI',
+          shortLabel: 'Codex',
+          description: 'OpenAI Codex CLI (codex exec --json)',
+          endpoint: '/api/codex/chat',
+          provider: 'openai',
+          defaultPayload: {
+            model: 'gpt-5-codex',
+            sandbox: 'danger-full-access',
+            skipGitCheck: true
+          }
+        }
+      ];
+      const state = {
+        open: false,
+        tasks: [],
+        lastFetchAt: null,
+        backendBase: 'http://localhost:7777',
+        mcpTools: [],
+        saasDocs: [],
+        modelOptions: MODEL_OPTIONS,
+        activeModelId: MODEL_OPTIONS[0]?.id || null
+      };
       const taskLogsCache = Object.create(null);
+      let modelToggleEl = null;
       const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
       const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
       const MARKDOWN_INLINE_CODE = /`([^`]+)`/g;
       const MARKDOWN_INLINE_LINK = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+      const HEATMAP_DAY_SPAN = 14;
+      const HOURS_IN_DAY = 24;
+      const HEATMAP_HOURS = Array.from({ length: HOURS_IN_DAY }, (_, i) => i);
+      const dayFormatter = new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric' });
+      const weekdayFormatter = new Intl.DateTimeFormat('ja-JP', { weekday: 'short' });
+      const hourFormatter = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', hour12: false });
+
+      function formatDayKey(date) {
+        return date.toISOString().slice(0, 10);
+      }
+
+      function formatDayLabel(date) {
+        return `${dayFormatter.format(date)} (${weekdayFormatter.format(date)})`;
+      }
+
+      function formatHourLabel(hour) {
+        try {
+          const sample = new Date();
+          sample.setHours(hour, 0, 0, 0);
+          return hourFormatter.format(sample);
+        } catch (_) {
+          return `${String(hour).padStart(2, '0')}時`;
+        }
+      }
+
+      function startOfDay(date) {
+        const d = new Date(date);
+        d.setHours(0, 0, 0, 0);
+        return d;
+      }
+
+      function buildHeatmapData() {
+        const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+        const now = new Date();
+        const end = new Date(now);
+        const start = startOfDay(now);
+        start.setDate(start.getDate() - (HEATMAP_DAY_SPAN - 1));
+
+        const days = [];
+        const matrix = new Map();
+        for (let i = 0; i < HEATMAP_DAY_SPAN; i += 1) {
+          const dayDate = new Date(start);
+          dayDate.setDate(start.getDate() + i);
+          const key = formatDayKey(dayDate);
+          days.push({ key, date: dayDate });
+          matrix.set(key, Array(HOURS_IN_DAY).fill(0));
+        }
+
+        let maxCount = 0;
+        let totalInRange = 0;
+        tasks.forEach(task => {
+          if (!task) return;
+          const source = task.createdAt || task.updatedAt || task.endedAt;
+          if (!source) return;
+          const ts = new Date(source);
+          if (Number.isNaN(ts.getTime())) return;
+          if (ts < start || ts > end) return;
+          const key = formatDayKey(ts);
+          const row = matrix.get(key);
+          if (!row) return;
+          const hour = ts.getHours();
+          row[hour] += 1;
+          totalInRange += 1;
+          if (row[hour] > maxCount) maxCount = row[hour];
+        });
+
+        return {
+          days,
+          matrix,
+          maxCount,
+          totalInRange
+        };
+      }
+
+      function computeHeatLevel(count, maxCount) {
+        if (!count || maxCount <= 0) return 0;
+        const ratio = count / maxCount;
+        if (ratio >= 0.75) return 4;
+        if (ratio >= 0.5) return 3;
+        if (ratio >= 0.25) return 2;
+        return 1;
+      }
+
+      function renderHeatmapLegend(maxCount) {
+        if (!heatmapLegendEl) return;
+        if (maxCount <= 0) {
+          heatmapLegendEl.innerHTML = '<span class="tb-heatmap-legend-label">データなし</span>';
+          return;
+        }
+        const items = [
+          { level: 0, label: '0件' },
+          { level: 1, label: '少ない' },
+          { level: 2, label: 'やや多い' },
+          { level: 3, label: '多い' },
+          { level: 4, label: `最多 (${maxCount}件)` }
+        ];
+        const html = items.map(item => {
+          return `<span class="tb-heatmap-legend-item"><span class="tb-heatmap-swatch" data-level="${item.level}"></span>${escapeHtml(item.label)}</span>`;
+        }).join('');
+        heatmapLegendEl.innerHTML = html;
+      }
+
+      function renderHeatmap() {
+        if (!heatmapEl) return;
+        const { days, matrix, maxCount, totalInRange } = buildHeatmapData();
+        if (!days.length) {
+          heatmapEl.innerHTML = '<div class="tb-heatmap-empty">データが見つかりませんでした</div>';
+          renderHeatmapLegend(0);
+          return;
+        }
+        if (totalInRange === 0) {
+          heatmapEl.innerHTML = '<div class="tb-heatmap-empty">直近14日間のタスクがありません</div>';
+          renderHeatmapLegend(0);
+          return;
+        }
+
+        let html = `<div class="tb-heatmap-grid" style="--heatmap-days:${days.length};">`;
+        html += '<div class="tb-heatmap-cell tb-heatmap-corner">時間</div>';
+        html += days.map(dayInfo => `<div class="tb-heatmap-cell tb-heatmap-day" data-day="${dayInfo.key}">${escapeHtml(formatDayLabel(dayInfo.date))}</div>`).join('');
+
+        HEATMAP_HOURS.forEach(hour => {
+          html += `<div class="tb-heatmap-cell tb-heatmap-hour">${escapeHtml(formatHourLabel(hour))}</div>`;
+          days.forEach(dayInfo => {
+            const row = matrix.get(dayInfo.key) || [];
+            const count = row[hour] || 0;
+            const level = computeHeatLevel(count, maxCount);
+            const tooltip = `${formatDayLabel(dayInfo.date)} ${formatHourLabel(hour)}: ${count}件`;
+            html += `<div class="tb-heatmap-cell tb-heatmap-value" data-level="${level}" data-count="${count}" title="${escapeHtml(tooltip)}"><span>${count ? count : ''}</span></div>`;
+          });
+        });
+
+        html += '</div>';
+        heatmapEl.innerHTML = html;
+        renderHeatmapLegend(maxCount);
+      }
 
       function formatInlineMarkdown(text) {
         let safe = escapeHtml(text);
@@ -1713,6 +1881,8 @@ async function initDocMenuTable() {
           error: task.error == null ? null : String(task.error),
           createdAt: task.createdAt || null,
           updatedAt: task.updatedAt || null,
+          model: typeof task.model === 'string' ? task.model : null,
+          provider: typeof task.provider === 'string' ? task.provider : null,
           logs
         };
       }
@@ -1730,6 +1900,8 @@ async function initDocMenuTable() {
           error: record.error ?? null,
           createdAt: record.createdAt || null,
           updatedAt: record.updatedAt || null,
+          model: record.model || null,
+          provider: record.provider || null,
           logs: Array.isArray(record.logs)
             ? record.logs.map(log => {
                 const text = String(log);
@@ -1772,6 +1944,7 @@ async function initDocMenuTable() {
             tasks: prepared,
             logs: logsPayload,
             backendBase: state.backendBase,
+            activeModelId: state.activeModelId,
             persistedAt: new Date().toISOString()
           };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -1810,6 +1983,9 @@ async function initDocMenuTable() {
               if (typeof value === 'string') taskLogsCache[key] = value;
             });
           }
+          if (typeof saved.activeModelId === 'string' && saved.activeModelId) {
+            state.activeModelId = saved.activeModelId;
+          }
           cleanupTasksAndLogs();
           schedulePersist();
         } catch(err) {
@@ -1818,10 +1994,61 @@ async function initDocMenuTable() {
       }
 
       loadPersistedState();
+      ensureActiveModel();
 
       window.addEventListener('beforeunload', () => {
         persistNow();
       });
+
+      function findModelOption(id) {
+        if (!id) return null;
+        return state.modelOptions.find(opt => opt.id === id) || null;
+      }
+
+      function getActiveModelOption() {
+        return findModelOption(state.activeModelId) || state.modelOptions[0] || null;
+      }
+
+      function ensureActiveModel() {
+        if (!findModelOption(state.activeModelId)) {
+          state.activeModelId = state.modelOptions[0]?.id || null;
+        }
+      }
+
+      function setActiveModel(id) {
+        ensureActiveModel();
+        const option = findModelOption(id) || getActiveModelOption();
+        if (!option) return;
+        if (state.activeModelId !== option.id) {
+          state.activeModelId = option.id;
+          schedulePersist();
+        }
+        updateModelBadge();
+      }
+
+      function updateModelBadge() {
+        if (!modelToggleEl) return;
+        const option = getActiveModelOption();
+        if (option) {
+          const label = option.shortLabel || option.label || option.id || 'モデル';
+          modelToggleEl.textContent = `@${label}`;
+          modelToggleEl.setAttribute('data-model', option.id);
+          modelToggleEl.setAttribute('title', `${option.label || label}（@で変更）`);
+        } else {
+          modelToggleEl.textContent = '@モデル';
+          modelToggleEl.removeAttribute('data-model');
+          modelToggleEl.setAttribute('title', '@でモデルを選択');
+        }
+      }
+
+      function buildModelPayload(model) {
+        if (!model || typeof model !== 'object') return { selectedModel: null };
+        const payload = { selectedModel: model.id };
+        if (model.defaultPayload && typeof model.defaultPayload === 'object') {
+          Object.assign(payload, model.defaultPayload);
+        }
+        return payload;
+      }
 
     const params = new URLSearchParams(location.search);
     const queryBackend = params.get('backend');
@@ -1869,10 +2096,18 @@ async function initDocMenuTable() {
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
         </div>
       </div>
+      <div class="taskboard-analytics">
+        <div class="tb-heatmap-header">
+          <div class="tb-heatmap-title">タスクヒートマップ</div>
+          <div class="tb-heatmap-legend" id="taskboardHeatmapLegend"></div>
+        </div>
+        <div class="taskboard-heatmap" id="taskboardHeatmap" role="img" aria-label="直近14日間の時間帯別タスク数ヒートマップ"></div>
+      </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
-        <div style="position:relative;flex:1;">
-          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (/でMCPダイヤルを開く、Enterで追加)" autocomplete="off" />
+        <button type="button" id="taskboardModelBadge" class="tb-model-toggle" aria-label="使用モデル (@で変更)">@Claude</button>
+        <div class="tb-input-wrapper">
+          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (/でMCPダイヤル、@でモデル選択、Enterで追加)" autocomplete="off" />
         </div>
         <button type="button" id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
       </div>
@@ -1882,9 +2117,18 @@ async function initDocMenuTable() {
     document.body.appendChild(panel);
 
     const listEl = panel.querySelector('#taskboardList');
+    const heatmapEl = panel.querySelector('#taskboardHeatmap');
+    const heatmapLegendEl = panel.querySelector('#taskboardHeatmapLegend');
     const inputEl = panel.querySelector('#taskboardInput');
     const sendEl  = panel.querySelector('#taskboardSend');
     const hideEl  = panel.querySelector('.tb-hide');
+    modelToggleEl = panel.querySelector('#taskboardModelBadge');
+    updateModelBadge();
+    modelToggleEl?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showModelDial();
+    });
     // Create a global dial overlay for MCP tools
     let dialOverlay = document.getElementById('mcpDialOverlay');
     if (!dialOverlay) {
@@ -2158,7 +2402,104 @@ async function initDocMenuTable() {
     function updateDialItems(searchQuery = ''){
       const itemsContainer = document.getElementById('mcpDialItems');
       if (!itemsContainer || !dialOverlay) return;
-      
+      const mode = dialOverlay.dataset.mode === 'model' ? 'model' : 'mcp';
+      if (mode === 'model') {
+        renderModelDialItems(itemsContainer, searchQuery);
+      } else {
+        renderMcpDialItems(itemsContainer, searchQuery);
+      }
+    }
+
+    function renderModelDialItems(itemsContainer, searchQuery = '') {
+      const dialInput = document.getElementById('mcpDialInput');
+      if (dialInput) {
+        dialInput.placeholder = 'モデルを検索...';
+      }
+      itemsContainer.classList.add('model-mode');
+      itemsContainer.innerHTML = '';
+
+      const q = searchQuery.toLowerCase();
+      const filtered = q === ''
+        ? state.modelOptions
+        : state.modelOptions.filter(model => {
+            const base = `${model.id || ''} ${model.label || ''} ${model.shortLabel || ''} ${model.description || ''} ${model.provider || ''}`.toLowerCase();
+            return base.includes(q);
+          });
+
+      const tooltip = getTooltipElement();
+      if (tooltip) {
+        tooltip.innerHTML = filtered.length
+          ? `<div class="mcp-tooltip-content"><div class="mcp-tooltip-desc">モデルを選択すると、このチャットで呼び出すCLIが切り替わります。</div></div>`
+          : `<div class="mcp-tooltip-content"><div class="mcp-tooltip-desc">該当するモデルが見つかりません</div></div>`;
+        tooltip.classList.add('visible');
+        tooltip.scrollTop = 0;
+      }
+
+      if (filtered.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'mcp-dial-empty';
+        empty.textContent = '利用可能なモデルが見つかりません';
+        itemsContainer.appendChild(empty);
+        return;
+      }
+
+      filtered.forEach((model, index) => {
+        const item = document.createElement('div');
+        item.className = 'mcp-dial-item model-item';
+        item.style.position = 'relative';
+        item.style.left = '';
+        item.style.top = '';
+        item.style.width = '';
+        item.style.height = '';
+        item.style.animationDelay = `${index * 0.05}s`;
+        item.setAttribute('data-model', model.id);
+        item.innerHTML = `
+          <div class="model-item-inner">
+            <div class="model-item-title">@${escapeHtml(model.shortLabel || model.label || model.id)}</div>
+            <div class="model-item-desc">${escapeHtml(model.description || '')}</div>
+            ${model.provider ? `<div class="model-item-provider">${escapeHtml(model.provider)}</div>` : ''}
+          </div>
+        `;
+
+        if (model.id === state.activeModelId) {
+          item.classList.add('selected');
+          item.classList.add('active');
+        }
+
+        item.addEventListener('click', () => {
+          setActiveModel(model.id);
+          dialOverlay.classList.remove('active');
+          hideTooltip();
+          if (inputEl) inputEl.focus();
+        });
+
+        item.addEventListener('mouseenter', () => {
+          itemsContainer.querySelectorAll('.mcp-dial-item').forEach(el => el.classList.remove('active'));
+          item.classList.add('active');
+          setTooltipSource(item);
+          if (tooltip) {
+            tooltip.innerHTML = `<div class="mcp-tooltip-content"><div class="mcp-tooltip-desc">${escapeHtml(model.description || '')}</div></div>`;
+            tooltip.classList.add('visible');
+            tooltip.scrollTop = 0;
+          }
+        });
+
+        item.addEventListener('mouseleave', () => {
+          scheduleTooltipHide(item);
+        });
+
+        itemsContainer.appendChild(item);
+      });
+    }
+
+    function renderMcpDialItems(itemsContainer, searchQuery = '') {
+      const dialInput = document.getElementById('mcpDialInput');
+      if (dialInput) {
+        dialInput.placeholder = 'ツールを検索...';
+      }
+      itemsContainer.classList.remove('model-mode');
+      itemsContainer.innerHTML = '';
+
       const q = searchQuery.toLowerCase();
       const filtered = q === '' ? state.mcpTools : state.mcpTools.filter(tool => {
         const name = (tool.name || '').toLowerCase();
@@ -2167,10 +2508,7 @@ async function initDocMenuTable() {
         const summary = (tool.saasSummary || '').toLowerCase();
         return name.includes(q) || label.includes(q) || desc.includes(q) || summary.includes(q);
       });
-      
-      // 既存のアイテムをクリア
-      itemsContainer.innerHTML = '';
-      
+
       if (filtered.length === 0) {
         const empty = document.createElement('div');
         empty.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-weak);';
@@ -2178,12 +2516,10 @@ async function initDocMenuTable() {
         itemsContainer.appendChild(empty);
         return;
       }
-      
-      // 円周上の配置を計算（レスポンシブ対応）
+
       const containerSize = window.innerWidth < 768 ? 600 : 900;
       const itemCount = filtered.length;
-      
-      // ツール数に応じて半径とアイテムサイズを動的に調整
+
       let radius, itemSize, sizeClass;
       if (itemCount <= 6) {
         radius = window.innerWidth < 768 ? 200 : 300;
@@ -2198,36 +2534,33 @@ async function initDocMenuTable() {
         itemSize = window.innerWidth < 768 ? 100 : 130;
         sizeClass = 'size-small';
       } else {
-        // 20個以上の場合は2重円にする
         radius = window.innerWidth < 768 ? 230 : 350;
         itemSize = window.innerWidth < 768 ? 100 : 120;
         sizeClass = 'size-small';
       }
-      
-      const centerX = containerSize / 2; // コンテナの中心X
-      const centerY = containerSize / 2; // コンテナの中心Y
-      const angleStep = (2 * Math.PI) / Math.min(itemCount, 20); // 最大20個まで外円に配置
-      const startAngle = -Math.PI / 2; // 上から開始
-      
+
+      const centerX = containerSize / 2;
+      const centerY = containerSize / 2;
+      const angleStep = (2 * Math.PI) / Math.min(itemCount, 20);
+      const startAngle = -Math.PI / 2;
+
       filtered.forEach((tool, index) => {
         let angle, x, y, currentRadius;
-        
-        // 20個以上の場合は内側の円にも配置
+
         if (itemCount > 20 && index >= 20) {
           const innerIndex = index - 20;
           const innerCount = itemCount - 20;
           const innerAngleStep = (2 * Math.PI) / innerCount;
-          currentRadius = radius * 0.6; // 内側の円は60%の半径
+          currentRadius = radius * 0.6;
           angle = startAngle + innerAngleStep * innerIndex;
         } else {
           angle = startAngle + angleStep * index;
           currentRadius = radius;
         }
-        
-        // 円形配置の座標計算
+
         x = centerX + currentRadius * Math.cos(angle);
         y = centerY + currentRadius * Math.sin(angle);
-        
+
         const item = document.createElement('div');
         const isInnerCircle = itemCount > 20 && index >= 20;
         const classes = ['mcp-dial-item', sizeClass];
@@ -2237,19 +2570,16 @@ async function initDocMenuTable() {
         item.style.height = `${itemSize}px`;
         item.style.left = `${x}px`;
         item.style.top = `${y}px`;
-        
-        // アニメーションを遅延
         item.style.animationDelay = `${index * 0.05}s`;
         item.setAttribute('data-tool', tool.name);
-        
-        // 3D配置のための角度を保存（CSSで使用）
+
         const angleDeg = (angle * 180 / Math.PI);
         item.setAttribute('data-angle', angleDeg);
         item.style.setProperty('--rotation', `${angleDeg}deg`);
-        
+
         const iconCat = tool.kind === 'saas' ? 'DOC' : guessIconFromName(tool.name);
         const categoryInfo = getCategoryColors(iconCat, tool);
-        
+
         item.innerHTML = `
           <div class="mcp-dial-item-inner">
             <div class="mcp-dial-icon" style="background: ${categoryInfo.bg};">
@@ -2258,8 +2588,7 @@ async function initDocMenuTable() {
             <div class="mcp-dial-label">${escapeHtml(tool.label || tool.name)}</div>
           </div>
         `;
-        
-        // クリックイベント
+
         item.addEventListener('click', () => {
           item.classList.add('selected');
           setTimeout(() => {
@@ -2274,20 +2603,16 @@ async function initDocMenuTable() {
             hideTooltip();
           }, 300);
         });
-        
-        // ホバー効果
+
         item.addEventListener('mouseenter', async () => {
-          // 他のアクティブ状態をクリア
           itemsContainer.querySelectorAll('.mcp-dial-item').forEach(el => {
             el.classList.remove('active');
           });
           item.classList.add('active');
-          
-          // 固定位置のツールチップに内容を表示
+
           const fixedTooltip = getTooltipElement();
           if (fixedTooltip && tool.description) {
             setTooltipSource(item);
-            // ローディング表示
             fixedTooltip.innerHTML = `
               <div class="mcp-tooltip-content">
                 <div class="mcp-tooltip-desc">${escapeHtml(tool.description)}</div>
@@ -2296,8 +2621,7 @@ async function initDocMenuTable() {
             `;
             fixedTooltip.classList.add('visible');
             fixedTooltip.scrollTop = 0;
-            
-            // 詳細情報を非同期で取得
+
             try {
               const details = await fetchMCPToolDetails(tool);
               const sections = [];
@@ -2334,20 +2658,18 @@ async function initDocMenuTable() {
             }
           }
         });
-        
-        // マウスが離れたらツールチップを非表示
+
         item.addEventListener('mouseleave', (e) => {
-          const tooltip = getTooltipElement();
-          if (tooltip && e.relatedTarget && tooltip.contains(e.relatedTarget)) {
+          const tooltipEl = getTooltipElement();
+          if (tooltipEl && e.relatedTarget && tooltipEl.contains(e.relatedTarget)) {
             return;
           }
           scheduleTooltipHide(item);
         });
-        
+
         itemsContainer.appendChild(item);
       });
-      
-      // 最初のアイテムをアクティブに
+
       const firstItem = itemsContainer.querySelector('.mcp-dial-item');
       if (firstItem) firstItem.classList.add('active');
     }
@@ -2355,10 +2677,27 @@ async function initDocMenuTable() {
     // 円形ダイヤルを表示する関数
     function showMCPDial(){
       if (!dialOverlay) return;
-      dialOverlay.classList.add('active');
+      dialOverlay.dataset.mode = 'mcp';
+      dialOverlay.classList.add('active', 'mode-mcp');
+      dialOverlay.classList.remove('mode-model');
       const dialInput = document.getElementById('mcpDialInput');
       if (dialInput) {
         dialInput.value = '';
+        dialInput.placeholder = 'ツールを検索...';
+        setTimeout(() => dialInput.focus(), 100);
+      }
+      updateDialItems('');
+    }
+
+    function showModelDial(){
+      if (!dialOverlay) return;
+      dialOverlay.dataset.mode = 'model';
+      dialOverlay.classList.add('active', 'mode-model');
+      dialOverlay.classList.remove('mode-mcp');
+      const dialInput = document.getElementById('mcpDialInput');
+      if (dialInput) {
+        dialInput.value = '';
+        dialInput.placeholder = 'モデルを検索...';
         setTimeout(() => dialInput.focus(), 100);
       }
       updateDialItems('');
@@ -2416,20 +2755,35 @@ async function initDocMenuTable() {
     async function submitRemoteTask(text){
       const prompt = String(text||'').trim();
       if (!prompt) return;
+      const selectedModel = getActiveModelOption();
+      const modelId = selectedModel ? selectedModel.id : null;
       const now = new Date().toISOString();
       const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const task = { id: tempId, status: 'running', prompt, createdAt: now, updatedAt: now, response: '', result: null, error: null };
+      const task = {
+        id: tempId,
+        status: 'running',
+        prompt,
+        createdAt: now,
+        updatedAt: now,
+        response: '',
+        result: null,
+        error: null,
+        model: modelId,
+        provider: selectedModel && selectedModel.provider ? selectedModel.provider : null
+      };
       mergeTask(task);
       render();
       try {
         const base = await probeBackendBase();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分のタイムアウト
-        
-        const res = await fetch(`${base.replace(/\/$/, '')}/api/claude/chat`, { 
+        const endpointPath = selectedModel && selectedModel.endpoint ? selectedModel.endpoint : '/api/claude/chat';
+        const payload = Object.assign({ prompt }, buildModelPayload(selectedModel));
+
+        const res = await fetch(`${base.replace(/\/$/, '')}${endpointPath}`, { 
           method: 'POST', 
           headers: { 'Content-Type': 'application/json' }, 
-          body: JSON.stringify({ prompt }),
+          body: JSON.stringify(payload),
           signal: controller.signal
         });
         
@@ -2441,6 +2795,8 @@ async function initDocMenuTable() {
         task.response = data && typeof data.response === 'string' ? data.response : '';
         task.result = data && data.result ? data.result : null;
         task.serverId = data && data.taskId ? String(data.taskId) : null;
+        task.model = modelId;
+        task.provider = selectedModel && selectedModel.provider ? selectedModel.provider : task.provider;
         const assistantLogs = Array.isArray(data && data.logs) ? data.logs.map(log => String(log)) : [];
         task.logs = assistantLogs;
         const cacheKey = task.serverId || task.id;
@@ -2474,6 +2830,7 @@ async function initDocMenuTable() {
       if (!listEl) return;
       if (!Array.isArray(state.tasks) || state.tasks.length === 0){
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
+        renderHeatmap();
         return;
       }
 
@@ -2498,7 +2855,22 @@ async function initDocMenuTable() {
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
         const items = [];
-        
+
+        const chosenModel = (() => {
+          if (t.model) {
+            const exact = state.modelOptions.find(opt => opt.id === t.model);
+            if (exact) return exact;
+          }
+          if (t.provider) {
+            const byProvider = state.modelOptions.find(opt => opt.provider === t.provider);
+            if (byProvider) return byProvider;
+          }
+          return state.modelOptions[0] || null;
+        })();
+        const modelBadge = chosenModel
+          ? `<span class="tb-model-pill" data-model="${escapeHtml(chosenModel.id)}">@${escapeHtml(chosenModel.shortLabel || chosenModel.label || chosenModel.id)}</span>`
+          : '';
+
         // URL検出
         for (const match of urlMatches) {
           const url = match[0].replace(/[.,;]+$/, '');
@@ -2567,7 +2939,10 @@ async function initDocMenuTable() {
               <span class="i">${icon}</span>
             </button>
             <div class="task-text">
-              <div>${title}</div>
+              <div class="task-title-row">
+                <span class="task-title-text">${title}</span>
+                ${modelBadge}
+              </div>
               ${startedAt ? `<div class="tb-timestamp">開始: ${escapeHtml(startedAt)}${finishedAt ? ` / 更新: ${escapeHtml(finishedAt)}` : ''}</div>` : ''}
               <div class="tb-meta" style="font-size:.75rem;color:var(--text-weak);margin-top:3px;">
                 ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
@@ -2585,6 +2960,8 @@ async function initDocMenuTable() {
         `;
       }).join('');
       listEl.innerHTML = html;
+
+      renderHeatmap();
 
       listEl.querySelectorAll('.task-item').forEach(card => {
         if (card.dataset.logsBound === '1') return;
@@ -2792,22 +3169,44 @@ async function initDocMenuTable() {
     toggleBtn.addEventListener('click', () => setOpen(!state.open));
     hideEl?.addEventListener('click', () => setOpen(false));
     sendEl?.addEventListener('click', () => { const v = inputEl?.value; if (inputEl) inputEl.value=''; submitRemoteTask(v); });
+    panel.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (!panel.contains(e.target)) return;
+      if (dialOverlay && dialOverlay.contains(e.target)) return;
+      if (!e.altKey && !e.ctrlKey && !e.metaKey) {
+        if (e.key === '/') {
+          e.preventDefault();
+          e.stopPropagation();
+          showMCPDial();
+        } else if (e.key === '@') {
+          e.preventDefault();
+          e.stopPropagation();
+          showModelDial();
+        }
+      }
+    }, true);
     
     inputEl?.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;
-      
+      if (!e.altKey && !e.ctrlKey && !e.metaKey) {
+        if (e.key === '/') {
+          e.preventDefault();
+          e.stopPropagation();
+          showMCPDial();
+          return;
+        }
+        if (e.key === '@') {
+          e.preventDefault();
+          e.stopPropagation();
+          showModelDial();
+          return;
+        }
+      }
+
       if (e.key === 'Enter') {
         e.preventDefault(); e.stopPropagation();
         const v = inputEl.value; inputEl.value = '';
         submitRemoteTask(v);
-      }
-    });
-    inputEl?.addEventListener('input', (e) => {
-      const value = e.target.value;
-      if (value === '/') {
-        // スラッシュのみの場合、円形ダイヤルを表示
-        showMCPDial();
-        e.target.value = ''; // スラッシュを消す
       }
     });
     // クリック外でダイヤルを非表示

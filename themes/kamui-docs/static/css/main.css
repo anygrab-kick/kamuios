@@ -763,11 +763,262 @@ pre.code code { color: var(--text); }
 .task-item.done .task-status { border-color: #22c55e; background: color-mix(in srgb, #22c55e 18%, var(--input-bg) 82%); }
 .task-item.done .task-status .i { color: #22c55e; }
 
+.task-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-title-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.tb-model-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(74,158,255,0.35);
+  background: rgba(74,158,255,0.18);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-transform: none;
+}
+.tb-model-pill[data-model="codex"] {
+  border-color: rgba(59,130,246,0.45);
+  background: rgba(59,130,246,0.22);
+}
+.tb-model-pill[data-model="claude"] {
+  border-color: rgba(244,114,182,0.4);
+  background: rgba(244,114,182,0.22);
+}
+[data-theme="light"] .tb-model-pill {
+  color: #0f172a;
+}
+
+.taskboard-analytics {
+  margin: 6px 10px 12px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(10px);
+}
+[data-theme="light"] .taskboard-analytics {
+  background: rgba(241, 245, 249, 0.88);
+  border-color: rgba(203, 213, 225, 0.7);
+}
+
+.tb-heatmap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tb-heatmap-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tb-heatmap-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 0.75rem;
+  color: var(--text-weak);
+}
+
+.tb-heatmap-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tb-heatmap-legend-label {
+  font-size: 0.75rem;
+  color: var(--text-weak);
+}
+
+.tb-heatmap-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.tb-heatmap-swatch[data-level="0"] { background: rgba(148, 163, 184, 0.22); }
+.tb-heatmap-swatch[data-level="1"] { background: rgba(59, 130, 246, 0.28); border-color: transparent; }
+.tb-heatmap-swatch[data-level="2"] { background: rgba(59, 130, 246, 0.45); border-color: transparent; }
+.tb-heatmap-swatch[data-level="3"] { background: rgba(37, 99, 235, 0.65); border-color: transparent; }
+.tb-heatmap-swatch[data-level="4"] { background: rgba(22, 78, 199, 0.85); border-color: transparent; }
+
+.taskboard-heatmap {
+  max-height: 320px;
+  overflow: auto;
+  padding-bottom: 4px;
+}
+
+.tb-heatmap-grid {
+  --heatmap-day-width: 48px;
+  display: grid;
+  grid-template-columns: 64px repeat(var(--heatmap-days, 14), var(--heatmap-day-width));
+  gap: 4px;
+  font-size: 0.72rem;
+  color: var(--text);
+  align-items: stretch;
+}
+
+.tb-heatmap-cell {
+  min-height: 26px;
+  border-radius: 6px;
+  padding: 6px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.tb-heatmap-corner,
+.tb-heatmap-day,
+.tb-heatmap-hour {
+  background: rgba(148, 163, 184, 0.12);
+  font-weight: 600;
+  color: var(--text);
+  position: sticky;
+  z-index: 1;
+}
+
+.tb-heatmap-corner,
+.tb-heatmap-hour {
+  left: 0;
+}
+
+.tb-heatmap-day {
+  top: 0;
+}
+
+[data-theme="light"] .tb-heatmap-corner,
+[data-theme="light"] .tb-heatmap-day,
+[data-theme="light"] .tb-heatmap-hour {
+  background: rgba(203, 213, 225, 0.35);
+}
+
+.tb-heatmap-hour {
+  text-align: right;
+  padding-right: 10px;
+}
+
+.tb-heatmap-value {
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  background: rgba(148, 163, 184, 0.14);
+  color: #f8fafc;
+}
+
+.tb-heatmap-value span {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.tb-heatmap-value[data-level="0"] {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-weak);
+}
+
+.tb-heatmap-value[data-level="1"] {
+  background: rgba(59, 130, 246, 0.28);
+}
+
+.tb-heatmap-value[data-level="2"] {
+  background: rgba(59, 130, 246, 0.45);
+}
+
+.tb-heatmap-value[data-level="3"] {
+  background: rgba(37, 99, 235, 0.65);
+}
+
+.tb-heatmap-value[data-level="4"] {
+  background: rgba(22, 78, 199, 0.85);
+  color: #f8fafc;
+}
+
+[data-theme="light"] .tb-heatmap-value[data-level="0"] {
+  background: rgba(148, 163, 184, 0.16);
+  color: #475569;
+}
+[data-theme="light"] .tb-heatmap-value[data-level="1"] {
+  background: rgba(59, 130, 246, 0.25);
+}
+[data-theme="light"] .tb-heatmap-value[data-level="2"] {
+  background: rgba(59, 130, 246, 0.42);
+}
+[data-theme="light"] .tb-heatmap-value[data-level="3"] {
+  background: rgba(37, 99, 235, 0.6);
+}
+[data-theme="light"] .tb-heatmap-value[data-level="4"] {
+  background: rgba(22, 78, 199, 0.78);
+  color: #f8fafc;
+}
+
+.tb-heatmap-value:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.15);
+}
+
+.tb-heatmap-empty {
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--text-weak);
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+}
+
 .taskboard-compose {
   display: flex; gap: 8px; padding: 10px; border-top: 1px solid rgba(255,255,255,0.10);
   background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.03));
 }
 [data-theme="light"] .taskboard-compose { border-top-color: rgba(0,0,0,0.08); }
+.tb-model-toggle {
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(74,158,255,0.35);
+  background: rgba(74,158,255,0.18);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.2s ease, border 0.2s ease, transform 0.2s ease;
+  white-space: nowrap;
+}
+.tb-model-toggle:hover {
+  background: rgba(74,158,255,0.26);
+  border-color: rgba(74,158,255,0.5);
+  transform: translateY(-1px);
+}
+.tb-model-toggle:active {
+  transform: scale(0.97);
+}
+[data-theme="light"] .tb-model-toggle {
+  background: rgba(37,99,235,0.15);
+  border-color: rgba(37,99,235,0.32);
+  color: #0f172a;
+}
+.tb-input-wrapper {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
 .tb-input {
   flex: 1; min-width: 0; width: 100%; padding: 8px 10px; font-size: 0.92rem; border-radius: 10px; border: 1px solid var(--border); background: var(--input-bg); color: var(--text);
 }
@@ -842,6 +1093,141 @@ pre.code code { color: var(--text); }
 .mcp-dial-overlay.active .mcp-dial-container {
   transform: scale(1) rotateX(45deg) rotateZ(0deg);
   opacity: 1;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-container {
+  width: min(520px, 92vw);
+  max-width: 520px;
+  height: auto;
+  transform: none;
+  opacity: 1;
+}
+
+.mcp-dial-overlay.mode-model.active .mcp-dial-container {
+  transform: none;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-items-wrapper {
+  position: relative;
+  width: 100%;
+  height: auto;
+  transform: none;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-items {
+  position: relative;
+  width: 100%;
+  height: auto;
+  animation: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transform: none;
+  padding-bottom: 12px;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-orbit-3d {
+  display: none;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-center {
+  position: relative;
+  top: 0;
+  left: 0;
+  transform: none;
+  width: 100%;
+  height: auto;
+  border-radius: 16px;
+  background: rgba(15,23,42,0.85);
+  border: 1px solid rgba(74,158,255,0.28);
+  box-shadow: none;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+[data-theme="light"] .mcp-dial-overlay.mode-model .mcp-dial-center {
+  background: rgba(255,255,255,0.92);
+  border-color: rgba(59,130,246,0.25);
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-input {
+  width: 100%;
+  text-align: left;
+  background: rgba(15,23,42,0.9);
+}
+[data-theme="light"] .mcp-dial-overlay.mode-model .mcp-dial-input {
+  background: rgba(248,250,252,0.96);
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-hint {
+  margin-top: 6px;
+  text-align: left;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-item {
+  position: relative;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: auto;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(148,163,184,0.18);
+  background: rgba(15,23,42,0.72);
+  transform: none !important;
+  transition: border 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.mcp-dial-overlay.mode-model .mcp-dial-item:hover,
+.mcp-dial-overlay.mode-model .mcp-dial-item.active {
+  border-color: rgba(74,158,255,0.45);
+  background: rgba(74,158,255,0.18);
+}
+
+.mcp-dial-overlay.mode-model .model-item-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #f8fafc;
+}
+
+.model-item-title {
+  font-weight: 600;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+}
+
+.model-item-desc {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
+.model-item-provider {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
+
+[data-theme="light"] .mcp-dial-overlay.mode-model .mcp-dial-item {
+  background: rgba(255,255,255,0.9);
+  border-color: rgba(59,130,246,0.25);
+}
+[data-theme="light"] .mcp-dial-overlay.mode-model .mcp-dial-item:hover,
+[data-theme="light"] .mcp-dial-overlay.mode-model .mcp-dial-item.active {
+  background: rgba(59,130,246,0.14);
+}
+[data-theme="light"] .model-item-desc {
+  color: #334155;
+  opacity: 0.9;
+}
+[data-theme="light"] .model-item-inner { color: #0f172a; }
+
+.mcp-dial-empty {
+  color: var(--text-weak);
+  text-align: center;
+  padding: 24px 0;
 }
 
 /* 3D回転用のラッパー */
