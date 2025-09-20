@@ -112,6 +112,13 @@ fi
 LOGS_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOGS_DIR"
 
+# Hugoの生成キャッシュをクリア（古いmain.js等が配信されるのを防ぐ）
+GEN_DIR="$SCRIPT_DIR/resources/_gen"
+if [ -d "$GEN_DIR" ]; then
+    log_info "Clearing Hugo generated assets cache..."
+    rm -rf "$GEN_DIR"
+fi
+
 # 1. Node.js backend server の起動
 log_info "Starting Node.js backend server on port ${PORT:-7777}..."
 cd "$SCRIPT_DIR/backend"

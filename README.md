@@ -311,7 +311,16 @@ KamuiOSは2つのサーバーで構成されています：
 
 ## AIエージェントタスク（右下フローティング）
 
-円形ダイヤルでMCPツールを選択し、Claude Code CLIのheadlessモードでプロンプトを実行するUIを提供します。
+円形ダイヤルでMCPツールを選択し、Claude Code CLIのheadlessモードでプロンプトを実行するUIを提供します。加えて、チャット入力欄に`@claude` / `@codex`と入力すると、CLIそのものに接続する対話型ターミナルを起動できます（PTY + WebSocketブリッジ方式）。
+
+### 対話型ターミナル (@claude / @codex)
+
+- `@claude` / `@codex` を入力して送信すると、新しいターミナルオーバーレイが開きます。以降の入出力はWebSocket (`/ws/pty`) を経由してローカルCLIプロセスとリアルタイム連携します。
+- モデルダイヤルにも **Codex Terminal (@Codex PTY)** を追加しており、選択してテキストを送信すると同じターミナルビューが自動で開きます（従来の `@Codex` モデルはSDK/API向けで残っています）。
+- バックエンドは `python3 backend/pty_bridge.py` を利用して疑似端末を生成し、Node.js (`backend/server.js`) がWebSocket経由でI/Oを仲介します。
+- `CLAUDE_MCP_CONFIG_PATH`、`CODEX_MODEL` など既存の環境変数がそのまま適用され、CLI起動時の既定引数が組み立てられます。
+- 初期入力を添えたい場合は `@claude 修正したい内容...` のように、コマンドの後ろに一行で続けてください。セッション確立後に自動で送信されます。
+- 前提条件: `python3` が利用可能で、ホストOSが `openpty(3)` を許可していること。macOS / Linux での利用を想定しています。
 
 ### 必要なサーバー
 
@@ -358,6 +367,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # または CLAUDE_API_KEY
 機能：
 - ✅ Node.js バックエンドサーバー（ポート 7777）
 - ✅ Hugo 開発サーバー（ポート 1313）
+- ✅ 起動前に `resources/_gen` をクリーンアップして最新の `main.js` などを必ず配信
 - ✅ ブラウザで http://localhost:1313/ を自動で開く
 - ✅ リアルタイムでログを監視
 - ✅ Claude Code CLIのheadlessモード統合

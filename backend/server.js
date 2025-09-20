@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
+const { createSession: createPtySession } = require('./ptyManager');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const SAAS_DIR = path.join(PROJECT_ROOT, 'data', 'saas');
@@ -148,6 +150,11 @@ const serverLogs = [];
 const SERVER_LOG_LIMIT = 1000;
 const SERVER_STARTED_AT = new Date().toISOString();
 const LOG_FILE_PATH = path.join(__dirname, 'backend.log');
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const PTY_ALLOWED_COMMANDS = new Set(['claude', 'codex']);
+const ptyWebsocketContexts = new Set();
+const MAX_WS_MESSAGE_BYTES = 2 * 1024 * 1024; // 2MB safety cap for incoming frames
+const terminalSessions = new Map();
 function writeLogLine(line) {
     try { fs.appendFileSync(LOG_FILE_PATH, line + '\n'); } catch (_) {}
 }
@@ -400,6 +407,185 @@ function normalizeBooleanEnv(value) {
     if (typeof value === 'boolean') return value;
     const lowered = String(value).trim().toLowerCase();
     return lowered === '1' || lowered === 'true' || lowered === 'yes' || lowered === 'on';
+}
+
+function createTerminalSessionId(prefix = 'codex-term') {
+    const random = crypto.randomBytes(6).toString('hex');
+    return `${prefix}-${Date.now()}-${random}`;
+}
+
+function escapeAppleScriptString(value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n');
+}
+
+function shellQuoteArgs(args) {
+    if (!Array.isArray(args)) return '';
+    return args.map((arg) => {
+        const str = String(arg);
+        if (!/[^A-Za-z0-9@%_+=:,./-]/.test(str)) {
+            return str;
+        }
+        return `'${str.replace(/'/g, `'\\''`)}'`;
+    }).join(' ');
+}
+
+function runAppleScript(script, { captureOutput = false } = {}) {
+    return new Promise((resolve, reject) => {
+        const child = spawn('osascript', ['-e', script]);
+        let stderr = '';
+        let stdout = '';
+        if (captureOutput && child.stdout) {
+            child.stdout.on('data', (chunk) => {
+                stdout += chunk.toString();
+            });
+        }
+        if (child.stderr) {
+            child.stderr.on('data', (chunk) => {
+                stderr += chunk.toString();
+            });
+        }
+        child.on('error', reject);
+        child.on('close', (code) => {
+            if (code === 0) {
+                resolve(captureOutput ? stdout.trim() : undefined);
+            } else {
+                const error = new Error(stderr.trim() || `osascript_exit_${code}`);
+                error.code = code;
+                reject(error);
+            }
+        });
+    });
+}
+
+async function focusItermSession(sessionId, appleSessionId = null) {
+    const escapedId = escapeAppleScriptString(sessionId);
+    const escapedAppleId = appleSessionId ? escapeAppleScriptString(String(appleSessionId)) : null;
+    const script = `
+        tell application "iTerm"
+            activate
+            set targetId to "${escapedId}"
+            ${escapedAppleId ? `set targetAppleId to "${escapedAppleId}"` : 'set targetAppleId to missing value'}
+            set foundSession to missing value
+            set foundTab to missing value
+            set foundWindow to missing value
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if ((targetAppleId is not missing value and (id of s as string) is equal to targetAppleId) or (name of s contains targetId)) then
+                            set foundSession to s
+                            set foundTab to t
+                            set foundWindow to w
+                            exit repeat
+                        end if
+                    end repeat
+                    if foundSession is not missing value then exit repeat
+                end repeat
+                if foundSession is not missing value then exit repeat
+            end repeat
+            if foundSession is missing value then error "session_not_found"
+            select foundWindow
+            select foundTab
+            select foundSession
+            activate
+        end tell
+    `;
+    await runAppleScript(script);
+}
+
+function resolvePtyCommandConfig(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    const rawCommand = payload.command || payload.id || payload.name;
+    if (!rawCommand || typeof rawCommand !== 'string') return null;
+    const commandId = rawCommand.trim().toLowerCase();
+    if (!PTY_ALLOWED_COMMANDS.has(commandId)) {
+        console.warn(`[PTY] Command not allowed: ${rawCommand}`);
+        return null;
+    }
+
+    if (commandId === 'claude') {
+        const args = [];
+        args.push('--verbose');
+        if (process.env.CLAUDE_SKIP_PERMISSIONS === '1' || process.env.CLAUDE_SKIP_PERMISSIONS === 'true') {
+            args.push('--dangerously-skip-permissions');
+        }
+        if (process.env.CLAUDE_DEBUG) {
+            args.push('--debug');
+            if (process.env.CLAUDE_DEBUG !== '1' && process.env.CLAUDE_DEBUG !== 'true') {
+                args.push(process.env.CLAUDE_DEBUG);
+            }
+        }
+
+        const providedMcp = payload.mcpConfigPath && typeof payload.mcpConfigPath === 'string'
+            ? payload.mcpConfigPath.trim()
+            : null;
+        const resolvedMcp = providedMcp || process.env.CLAUDE_MCP_CONFIG_PATH || null;
+        if (resolvedMcp) {
+            args.push('--mcp-config', resolvedMcp);
+        } else {
+            console.warn('[PTY] CLAUDE_MCP_CONFIG_PATH is not set; interactive session may lack MCP context');
+        }
+
+        const maxTurnsEnv = process.env.CLAUDE_MAX_TURNS;
+        if (maxTurnsEnv && maxTurnsEnv.toString().trim()) {
+            args.push('--max-turns', String(maxTurnsEnv).trim());
+        }
+
+        if (payload.subcommand && typeof payload.subcommand === 'string' && payload.subcommand.trim()) {
+            args.unshift(payload.subcommand.trim());
+        }
+
+        if (Array.isArray(payload.args)) {
+            payload.args.filter(arg => typeof arg === 'string' && arg.trim() !== '').forEach(arg => {
+                args.push(arg);
+            });
+        }
+
+        return {
+            command: 'claude',
+            args,
+            meta: { mcpConfigPath: resolvedMcp }
+        };
+    }
+
+    if (commandId === 'codex') {
+        const args = [];
+        const subcommand = payload.subcommand && typeof payload.subcommand === 'string'
+            ? payload.subcommand.trim()
+            : '';
+        if (subcommand) {
+            args.push(subcommand);
+        }
+
+        const configOverrides = Array.isArray(payload.configOverrides)
+            ? payload.configOverrides
+            : (typeof payload.configOverrides === 'string'
+                ? payload.configOverrides.split(/[;,\n]+/).map(entry => entry.trim()).filter(Boolean)
+                : []);
+        configOverrides.forEach(entry => {
+            args.push('-c', entry);
+        });
+        if (Array.isArray(payload.args)) {
+            payload.args.filter(arg => typeof arg === 'string' && arg.trim() !== '').forEach(arg => {
+                args.push(arg);
+            });
+        }
+        return {
+            command: 'codex',
+            args,
+            meta: {
+                model: null,
+                profile: null,
+                sandbox: null
+            }
+        };
+    }
+
+    return null;
 }
 
 function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides, extraArgs, skipGitCheck }) {
@@ -1256,6 +1442,199 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ error: 'Invalid request' }));
             }
         });
+    } else if (requestUrl.pathname === '/api/pty/open-iterm' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', async () => {
+            if (process.platform !== 'darwin') {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'unsupported_platform' }));
+                return;
+            }
+
+            let targetPath = PROJECT_ROOT;
+            if (body) {
+                try {
+                    const payload = JSON.parse(body);
+                    if (payload && typeof payload.cwd === 'string') {
+                        const trimmed = payload.cwd.trim();
+                        if (trimmed.startsWith('/')) {
+                            targetPath = trimmed;
+                        }
+                    }
+                } catch (_) {
+                    // ignore invalid JSON payloads; fallback to default path
+                }
+            }
+
+            try {
+                const launchCandidates = ['iTerm', 'iTerm2'];
+                let launchedApp = null;
+                let lastError = null;
+                for (const appName of launchCandidates) {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const child = spawn('open', ['-a', appName, targetPath], { stdio: 'ignore' });
+                            child.on('error', reject);
+                            child.on('close', (code) => {
+                                if (code === 0) resolve();
+                                else reject(new Error(`open_exit_${code}`));
+                            });
+                        });
+                        launchedApp = appName;
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                    }
+                }
+
+                if (!launchedApp) {
+                    throw lastError || new Error('iTerm_not_available');
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, app: launchedApp, path: targetPath }));
+            } catch (err) {
+                console.error('[PTY] Failed to open iTerm:', err.message);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'failed_to_open_iterm', message: err.message }));
+            }
+        });
+    } else if (requestUrl.pathname === '/api/terminal/codex' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', async () => {
+            let payload = {};
+            if (body) {
+                try {
+                    payload = JSON.parse(body);
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'invalid_json', message: err.message }));
+                    return;
+                }
+            }
+
+            const actionRaw = typeof payload.action === 'string' ? payload.action.toLowerCase() : 'launch';
+
+            if (actionRaw === 'focus') {
+                const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+                if (!sessionId) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'missing_session_id' }));
+                    return;
+                }
+                const session = terminalSessions.get(sessionId);
+                if (!session) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'session_not_found' }));
+                    return;
+                }
+                try {
+                    await focusItermSession(sessionId, session.appleSessionId || null);
+                    session.lastFocusedAt = new Date().toISOString();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true }));
+                } catch (err) {
+                    const message = err && err.message ? err.message : String(err || 'focus_failed');
+                    const notFound = /session_not_found/i.test(message);
+                    if (notFound) {
+                        terminalSessions.delete(sessionId);
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'session_not_found' }));
+                        return;
+                    }
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'focus_failed', message }));
+                }
+                return;
+            }
+
+            if (process.platform !== 'darwin') {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'unsupported_platform' }));
+                return;
+            }
+
+            const sessionId = createTerminalSessionId();
+            const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+            const customArgs = Array.isArray(payload.args)
+                ? payload.args.filter(arg => typeof arg === 'string' && arg.trim() !== '')
+                : [];
+            const baseCommand = payload && typeof payload.command === 'string' && payload.command.trim()
+                ? payload.command.trim()
+                : 'codex';
+            const commandArgs = customArgs.length ? `${baseCommand} ${shellQuoteArgs(customArgs)}` : baseCommand;
+            const cwdCandidate = payload && typeof payload.cwd === 'string' && payload.cwd.trim()
+                ? payload.cwd.trim()
+                : PROJECT_ROOT;
+            const resolvedCwd = cwdCandidate.startsWith('/') ? cwdCandidate : PROJECT_ROOT;
+
+            const sessionLabel = `@Codex+terminal:${sessionId}`;
+            const escapedLabel = escapeAppleScriptString(sessionLabel);
+            const escapedCommand = escapeAppleScriptString(commandArgs);
+            const escapedPrompt = escapeAppleScriptString(prompt);
+            const escapedCwdForAppleScript = escapeAppleScriptString(resolvedCwd);
+
+            const scriptLines = [
+                'tell application "iTerm"',
+                '    activate',
+                '    set theSession to missing value',
+                '    if (count of windows) = 0 then',
+                '        set newWindow to create window with default profile',
+                '        set theSession to current session of newWindow',
+                '    else',
+                '        set newWindow to current window',
+                '        tell newWindow',
+                '            create tab with default profile',
+                '            set theSession to current session of current tab',
+                '        end tell',
+                '    end if',
+                '    if theSession is missing value then',
+                '        set newWindow to create window with default profile',
+                '        set theSession to current session of newWindow',
+                '    end if',
+                `    set name of theSession to "${escapedLabel}"`,
+                '    tell theSession'
+            ];
+            scriptLines.push(`        write text "cd " & quoted form of "${escapedCwdForAppleScript}"`);
+            scriptLines.push(`        write text "${escapedCommand}"`);
+            scriptLines.push('    end tell');
+            if (prompt) {
+                scriptLines.push('    delay 0.5');
+                scriptLines.push(`    tell theSession to write text "${escapedPrompt}"`);
+            }
+            scriptLines.push('    set sessionIdentifier to id of theSession as string');
+            scriptLines.push('    sessionIdentifier');
+            scriptLines.push('end tell');
+            const script = scriptLines.join('\n');
+
+            try {
+                const appleSessionId = await runAppleScript(script, { captureOutput: true });
+                const sessionRecord = {
+                    id: sessionId,
+                    app: 'iTerm',
+                    command: commandArgs,
+                    prompt,
+                    cwd: resolvedCwd,
+                    createdAt: new Date().toISOString(),
+                    model: payload && typeof payload.model === 'string' ? payload.model : null,
+                    appleSessionId: appleSessionId || null
+                };
+                terminalSessions.set(sessionId, sessionRecord);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, sessionId, appleSessionId, app: sessionRecord.app, command: sessionRecord.command }));
+            } catch (err) {
+                const message = err && err.message ? err.message : String(err || 'launch_failed');
+                console.error('[Terminal] Failed to open Codex session:', message);
+                console.error('[Terminal] AppleScript payload:', script);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'launch_failed', message }));
+            }
+        });
     } else if (requestUrl.pathname === '/api/health' && req.method === 'GET') {
         const all = Object.values(tasks);
         const stats = all.reduce((acc, t) => {
@@ -1761,6 +2140,440 @@ curl -s -X POST "$TOOL_URL" \
     } else {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Not found' }));
+    }
+});
+
+function createWebSocketAcceptValue(key) {
+    return crypto.createHash('sha1').update(`${key}${WS_GUID}`).digest('base64');
+}
+
+function sendWebSocketFrame(socket, opcode, payload) {
+    if (!socket || socket.destroyed) return;
+    const payloadBuffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || '');
+    const payloadLength = payloadBuffer.length;
+    let headerLength = 2;
+    if (payloadLength >= 126 && payloadLength < 65536) headerLength += 2;
+    else if (payloadLength >= 65536) headerLength += 8;
+    const frame = Buffer.alloc(headerLength + payloadLength);
+    frame[0] = 0x80 | (opcode & 0x0f);
+    if (payloadLength < 126) {
+        frame[1] = payloadLength;
+        payloadBuffer.copy(frame, 2);
+    } else if (payloadLength < 65536) {
+        frame[1] = 126;
+        frame.writeUInt16BE(payloadLength, 2);
+        payloadBuffer.copy(frame, 4);
+    } else {
+        frame[1] = 127;
+        frame.writeBigUInt64BE(BigInt(payloadLength), 2);
+        payloadBuffer.copy(frame, 10);
+    }
+    socket.write(frame);
+}
+
+function sendWebSocketJson(context, message) {
+    if (!context || !context.alive) return;
+    try {
+        const payload = Buffer.from(JSON.stringify(message), 'utf8');
+        if (payload.length > MAX_WS_MESSAGE_BYTES) {
+            console.warn('[WS][PTY] Payload too large, dropping message');
+            return;
+        }
+        sendWebSocketFrame(context.socket, 0x1, payload);
+    } catch (err) {
+        console.error('[WS][PTY] Failed to send JSON message:', err.message);
+        cleanupPtyContext(context, { reason: 'send_error' });
+    }
+}
+
+function sendWebSocketClose(context, code = 1000, reason = '') {
+    if (!context || !context.alive) return;
+    try {
+        const payload = Buffer.alloc(reason ? 2 + Buffer.byteLength(reason) : 2);
+        payload.writeUInt16BE(code, 0);
+        if (reason) {
+            payload.write(reason, 2);
+        }
+        sendWebSocketFrame(context.socket, 0x8, payload);
+    } catch (err) {
+        console.warn('[WS][PTY] Failed to send close frame:', err.message);
+    }
+}
+
+function decodeMaskedPayload(maskKey, payload) {
+    const result = Buffer.alloc(payload.length);
+    for (let i = 0; i < payload.length; i += 1) {
+        result[i] = payload[i] ^ maskKey[i % 4];
+    }
+    return result;
+}
+
+function cleanupPtyContext(context, options = {}) {
+    if (!context || !context.alive) return;
+    context.alive = false;
+    ptyWebsocketContexts.delete(context);
+
+    if (context.session) {
+        const listeners = context.sessionListeners || [];
+        listeners.forEach(({ event, handler }) => {
+            if (typeof context.session.off === 'function') {
+                context.session.off(event, handler);
+            } else {
+                context.session.removeListener(event, handler);
+            }
+        });
+        if (!context.session.exited) {
+            try {
+                context.session.dispose();
+            } catch (_) {
+                // ignore cleanup errors
+            }
+        }
+        context.session = null;
+        context.sessionListeners = [];
+    }
+
+    if (context.socket && !context.socket.destroyed) {
+        try {
+            if (options.sendCloseFrame) {
+                sendWebSocketClose(context, options.closeCode || 1000, options.closeReason || '');
+            }
+            context.socket.end();
+        } catch (_) {
+            // ignore
+        }
+        try {
+            context.socket.destroy();
+        } catch (_) {
+            // ignore
+        }
+    }
+}
+
+function attachSessionToContext(context, session, commandConfig) {
+    context.session = session;
+    context.sessionListeners = [];
+
+    function emulateTerminalResponses(buffer) {
+        if (!buffer || !buffer.length) return;
+        try {
+            const text = buffer.toString('binary');
+            if (text.includes('\u001b[6n')) {
+                session.write(Buffer.from('\u001b[1;1R', 'binary'));
+            }
+        } catch (err) {
+            console.warn('[WS][PTY] emulateTerminalResponses error:', err.message);
+        }
+    }
+
+    const wrapListener = (event, handler) => {
+        session.on(event, handler);
+        context.sessionListeners.push({ event, handler });
+    };
+
+    wrapListener('ready', (info) => {
+        sendWebSocketJson(context, {
+            type: 'ready',
+            sessionId: session.id,
+            pid: info && info.pid ? info.pid : null,
+            command: commandConfig.command,
+            args: commandConfig.args
+        });
+    });
+
+    wrapListener('output', (buffer) => {
+        if (!Buffer.isBuffer(buffer)) return;
+        sendWebSocketJson(context, {
+            type: 'output',
+            data: buffer.toString('base64')
+        });
+        emulateTerminalResponses(buffer);
+    });
+
+    wrapListener('error', (err) => {
+        sendWebSocketJson(context, {
+            type: 'error',
+            message: err && err.message ? err.message : String(err || 'Unknown session error')
+        });
+    });
+
+    wrapListener('pong', (ts) => {
+        sendWebSocketJson(context, { type: 'pong', ts });
+    });
+
+    const handleExit = (info) => {
+        sendWebSocketJson(context, {
+            type: 'exit',
+            exitCode: info && Object.prototype.hasOwnProperty.call(info, 'exitCode') ? info.exitCode : null,
+            signal: info && Object.prototype.hasOwnProperty.call(info, 'signal') ? info.signal : null
+        });
+        cleanupPtyContext(context, { sendCloseFrame: true, closeCode: 1000 });
+    };
+    session.once('exit', handleExit);
+    context.sessionListeners.push({ event: 'exit', handler: handleExit });
+}
+
+function handlePtyClientMessage(context, message) {
+    if (!context.alive) return;
+    if (!message || typeof message !== 'object') {
+        sendWebSocketJson(context, { type: 'error', message: 'invalid_message' });
+        return;
+    }
+
+    const type = message.type;
+
+    if (type === 'start') {
+        if (context.session) {
+            sendWebSocketJson(context, { type: 'error', message: 'session_already_started' });
+            return;
+        }
+        const commandConfig = resolvePtyCommandConfig(message);
+        if (!commandConfig) {
+            sendWebSocketJson(context, { type: 'error', message: 'unsupported_command' });
+            return;
+        }
+
+        const sessionEnv = {};
+        if (message.env && typeof message.env === 'object') {
+            Object.entries(message.env).forEach(([key, value]) => {
+                if (typeof key === 'string' && typeof value === 'string') {
+                    sessionEnv[key] = value;
+                }
+            });
+        }
+
+        try {
+            const session = createPtySession({
+                command: commandConfig.command,
+                args: commandConfig.args,
+                cwd: PROJECT_ROOT,
+                env: Object.keys(sessionEnv).length ? sessionEnv : null
+            });
+            attachSessionToContext(context, session, commandConfig);
+            sendWebSocketJson(context, {
+                type: 'starting',
+                sessionId: session.id,
+                command: commandConfig.command,
+                args: commandConfig.args
+            });
+        } catch (err) {
+            console.error('[WS][PTY] Failed to start session:', err.message);
+            sendWebSocketJson(context, { type: 'error', message: err.message || 'failed_to_start_session' });
+        }
+        return;
+    }
+
+    if (!context.session) {
+        sendWebSocketJson(context, { type: 'error', message: 'session_not_started' });
+        return;
+    }
+
+    if (type === 'input') {
+        let buffer = null;
+        if (typeof message.base64 === 'string') {
+            try {
+                buffer = Buffer.from(message.base64, 'base64');
+            } catch (err) {
+                sendWebSocketJson(context, { type: 'error', message: 'invalid_base64' });
+                return;
+            }
+        } else if (typeof message.data === 'string') {
+            buffer = Buffer.from(message.data, 'utf8');
+        }
+        if (!buffer || !buffer.length) return;
+        if (buffer.length > 16 * 1024) {
+            buffer = buffer.slice(0, 16 * 1024);
+        }
+        if (message.appendNewline) {
+            buffer = Buffer.concat([buffer, Buffer.from('\r', 'utf8')]);
+        }
+        context.session.write(buffer);
+        return;
+    }
+
+    if (type === 'resize') {
+        const rows = Number.isFinite(message.rows) ? Number(message.rows) : undefined;
+        const cols = Number.isFinite(message.cols) ? Number(message.cols) : undefined;
+        context.session.resize(rows, cols);
+        return;
+    }
+
+    if (type === 'terminate') {
+        const signalName = typeof message.signal === 'string' ? message.signal : 'SIGTERM';
+        context.session.terminate(signalName);
+        return;
+    }
+
+    if (type === 'ping') {
+        sendWebSocketJson(context, { type: 'pong', ts: message.ts || Date.now() });
+        return;
+    }
+
+    if (type === 'close') {
+        cleanupPtyContext(context, { sendCloseFrame: true });
+        return;
+    }
+
+    sendWebSocketJson(context, { type: 'error', message: `unknown_message:${type}` });
+}
+
+function processPtySocketData(context, chunk) {
+    if (!context.alive) return;
+    context.buffer = Buffer.concat([context.buffer, chunk]);
+
+    while (context.buffer.length >= 2) {
+        const firstByte = context.buffer[0];
+        const secondByte = context.buffer[1];
+        const fin = (firstByte & 0x80) !== 0;
+        const opcode = firstByte & 0x0f;
+        const masked = (secondByte & 0x80) !== 0;
+        let payloadLength = secondByte & 0x7f;
+        let offset = 2;
+
+        if (payloadLength === 126) {
+            if (context.buffer.length < offset + 2) return;
+            payloadLength = context.buffer.readUInt16BE(offset);
+            offset += 2;
+        } else if (payloadLength === 127) {
+            if (context.buffer.length < offset + 8) return;
+            payloadLength = Number(context.buffer.readBigUInt64BE(offset));
+            offset += 8;
+        }
+
+        const totalLength = offset + (masked ? 4 : 0) + payloadLength;
+        if (context.buffer.length < totalLength) return;
+
+        const maskKey = masked ? context.buffer.slice(offset, offset + 4) : null;
+        offset += masked ? 4 : 0;
+        const payload = context.buffer.slice(offset, offset + payloadLength);
+        context.buffer = context.buffer.slice(totalLength);
+
+        let data = payload;
+        if (masked && maskKey) {
+            data = decodeMaskedPayload(maskKey, payload);
+        }
+
+        if (!fin) {
+            // For simplicity, drop fragmented frames
+            console.warn('[WS][PTY] Fragmented frames are not supported; closing connection');
+            cleanupPtyContext(context, { sendCloseFrame: true, closeCode: 1002, closeReason: 'fragmented_not_supported' });
+            return;
+        }
+
+        if (opcode === 0x8) { // Close
+            cleanupPtyContext(context, { sendCloseFrame: true, closeCode: 1000 });
+            return;
+        }
+
+        if (opcode === 0x9) { // Ping
+            sendWebSocketFrame(context.socket, 0xA, data);
+            continue;
+        }
+
+        if (opcode === 0xA) { // Pong
+            continue;
+        }
+
+        if (opcode === 0x1) { // Text frame
+            let text;
+            try {
+                text = data.toString('utf8');
+            } catch (err) {
+                console.warn('[WS][PTY] Failed to decode UTF-8 text frame:', err.message);
+                continue;
+            }
+            let parsed;
+            try {
+                parsed = JSON.parse(text);
+            } catch (err) {
+                sendWebSocketJson(context, { type: 'error', message: 'invalid_json' });
+                continue;
+            }
+            handlePtyClientMessage(context, parsed);
+            continue;
+        }
+
+        if (opcode === 0x2) { // Binary frame
+            // Interpret as base64 JSON payload
+            if (data.length > 0) {
+                handlePtyClientMessage(context, { type: 'input', base64: data.toString('base64') });
+            }
+            continue;
+        }
+
+        // Unsupported opcode
+        console.warn(`[WS][PTY] Unsupported opcode ${opcode}, closing connection`);
+        cleanupPtyContext(context, { sendCloseFrame: true, closeCode: 1003, closeReason: 'unsupported_opcode' });
+        return;
+    }
+}
+
+function handlePtyUpgrade(req, socket, head) {
+    const key = req.headers['sec-websocket-key'];
+    if (!key) {
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        socket.destroy();
+        return;
+    }
+
+    const acceptValue = createWebSocketAcceptValue(key);
+    const responseHeaders = [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${acceptValue}`
+    ];
+
+    if (req.headers['sec-websocket-protocol']) {
+        const protocol = req.headers['sec-websocket-protocol'].split(',')[0].trim();
+        if (protocol) {
+            responseHeaders.push(`Sec-WebSocket-Protocol: ${protocol}`);
+        }
+    }
+
+    responseHeaders.push('\r\n');
+    socket.write(responseHeaders.join('\r\n'));
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 15000);
+
+    const context = {
+        socket,
+        buffer: head && head.length ? Buffer.from(head) : Buffer.alloc(0),
+        alive: true,
+        session: null,
+        sessionListeners: []
+    };
+    ptyWebsocketContexts.add(context);
+
+    socket.on('data', (chunk) => processPtySocketData(context, chunk));
+    socket.on('close', () => cleanupPtyContext(context));
+    socket.on('end', () => cleanupPtyContext(context));
+    socket.on('error', () => cleanupPtyContext(context));
+
+    if (context.buffer.length > 0) {
+        processPtySocketData(context, Buffer.alloc(0));
+    }
+}
+
+server.on('upgrade', (req, socket, head) => {
+    if (!req || !req.url) {
+        socket.destroy();
+        return;
+    }
+    let pathname = null;
+    try {
+        const fullUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+        pathname = fullUrl.pathname;
+    } catch (err) {
+        socket.destroy();
+        return;
+    }
+
+    if (pathname === '/ws/pty') {
+        handlePtyUpgrade(req, socket, head);
+    } else {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
     }
 });
 

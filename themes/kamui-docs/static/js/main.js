@@ -1587,11 +1587,11 @@ async function initDocMenuTable() {
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
       const STORAGE_KEY = 'kamui_task_board_v1';
-      const STORAGE_VERSION = 2;
+      const STORAGE_VERSION = 3;
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
-      const MODEL_OPTIONS = [
+      const MODEL_BLUEPRINTS = [
         {
           id: 'claude',
           label: 'Claude CLI',
@@ -1606,12 +1606,23 @@ async function initDocMenuTable() {
           shortLabel: 'Codex',
           description: 'OpenAI Codex CLI (codex exec --json)',
           endpoint: '/api/codex/chat',
+          provider: 'openai'
+        },
+        {
+          id: 'codex-pty',
+          label: 'Codex Terminal',
+          shortLabel: 'Codex PTY',
+          description: 'OpenAI Codex 仮想端末 (WebSocket + PTY)',
           provider: 'openai',
-          defaultPayload: {
-            model: 'gpt-5-codex',
-            sandbox: 'danger-full-access',
-            skipGitCheck: true
-          }
+          ptyCommand: 'codex'
+        },
+        {
+          id: 'codex-iterm',
+          label: 'Codex + Terminal',
+          shortLabel: 'Codex+terminal',
+          description: 'OpenAI Codex CLI (ローカル iTerm で起動)',
+          provider: 'openai',
+          externalTerminalType: 'codex-iterm'
         }
       ];
       const state = {
@@ -1621,13 +1632,14 @@ async function initDocMenuTable() {
         backendBase: 'http://localhost:7777',
         mcpTools: [],
         saasDocs: [],
-        modelOptions: MODEL_OPTIONS,
-        activeModelId: MODEL_OPTIONS[0]?.id || null,
+        modelOptions: MODEL_BLUEPRINTS.map(opt => ({ ...opt })),
+        activeModelId: MODEL_BLUEPRINTS[0]?.id || null,
         heatmapCollapsed: true,
         heatmapSelection: null
       };
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
+      const decoder = typeof window.TextDecoder !== 'undefined' ? new TextDecoder() : null;
       const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
       const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
       const MARKDOWN_INLINE_CODE = /`([^`]+)`/g;
@@ -1656,6 +1668,473 @@ async function initDocMenuTable() {
         hour: '2-digit',
         hour12: false
       });
+
+      function buildBackendWebSocketUrl(base, path) {
+        const trimmedPath = path.startsWith('/') ? path : `/${path}`;
+        try {
+          const baseStr = typeof base === 'string' ? base.trim() : '';
+          const combined = baseStr ? `${baseStr.replace(/\/$/, '')}${trimmedPath}` : trimmedPath;
+          const url = new URL(combined, window.location.origin);
+          if (url.protocol === 'http:') url.protocol = 'ws:';
+          else if (url.protocol === 'https:') url.protocol = 'wss:';
+          url.search = '';
+          url.hash = '';
+          return url.toString();
+        } catch (err) {
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          return `${proto}//${window.location.host}${trimmedPath}`;
+        }
+      }
+
+      function createTerminalManager() {
+        let overlay = null;
+        let titleEl = null;
+        let outputEl = null;
+        let inputEl = null;
+        let sendBtn = null;
+        let ctrlCBtn = null;
+        let attachBtn = null;
+        let ws = null;
+        let sessionId = null;
+        let isReady = false;
+        let outputLines = [];
+        let currentLine = '';
+        let pendingQueue = [];
+        let pendingInitialInput = '';
+        let currentCommand = '';
+        let pendingSendQueue = [];
+
+        const ANSI_OSC_REGEX = /\u001B\][^\u0007]*\u0007/g;
+        const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-9;?]*[ -\/]*[0-~])/g;
+        const CONTROL_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
+        function normalizeTerminalOutput(text) {
+          if (!text) return '';
+          let result = text.replace(/\r\n/g, '\n');
+          result = result.replace(ANSI_OSC_REGEX, '');
+          result = result.replace(ANSI_ESCAPE_REGEX, '');
+          result = result.replace(CONTROL_REGEX, '');
+          return result;
+        }
+
+        function trimOutput(maxChars = 60000) {
+          let total = currentLine.length;
+          for (let i = 0; i < outputLines.length; i += 1) {
+            total += outputLines[i].length + 1;
+          }
+          while (total > maxChars && outputLines.length) {
+            const removed = outputLines.shift();
+            total -= removed.length + 1;
+          }
+          if (total > maxChars) {
+            const excess = total - maxChars;
+            currentLine = currentLine.slice(excess);
+          }
+        }
+
+        function commitLine(line) {
+          if (line == null) return;
+          outputLines.push(String(line));
+          trimOutput();
+          renderOutput();
+        }
+
+        function renderOutput() {
+          if (!outputEl) return;
+          const buffer = currentLine ? [...outputLines, currentLine] : outputLines.slice();
+          outputEl.textContent = buffer.join('\n');
+          outputEl.scrollTop = outputEl.scrollHeight;
+        }
+
+
+        function ensureOverlay() {
+          if (overlay) return;
+          overlay = document.createElement('div');
+          overlay.id = 'ptyTerminalOverlay';
+          overlay.className = 'pty-terminal-overlay';
+          overlay.setAttribute('role', 'dialog');
+          overlay.setAttribute('aria-modal', 'true');
+          overlay.innerHTML = `
+            <div class="pty-terminal" role="document">
+              <div class="pty-terminal-header">
+                <div class="pty-terminal-title" data-role="title">@claude</div>
+                <div class="pty-terminal-actions">
+                  <button type="button" class="pty-terminal-btn" data-action="ctrl-c" title="Ctrl+C">Ctrl+C</button>
+                  <button type="button" class="pty-terminal-btn" data-action="attach" title="iTermで開く">iTerm</button>
+                  <button type="button" class="pty-terminal-btn" data-action="close" title="閉じる">×</button>
+                </div>
+              </div>
+              <div class="pty-terminal-body">
+                <div class="pty-terminal-output" data-role="output" tabindex="0"></div>
+              </div>
+              <div class="pty-terminal-input-row">
+                <div class="pty-terminal-input-col">
+                  <textarea class="pty-terminal-input" data-role="input" rows="2" placeholder="メッセージを入力し Enter で送信 (Shift+Enter で改行)" autocomplete="off"></textarea>
+                  <div class="pty-terminal-shortcuts" data-role="shortcuts">⏎ send ・ ⌃J newline ・ ⌃T transcript ・ ⌃C quit</div>
+                </div>
+                <button type="button" class="pty-terminal-send" data-action="send">送信</button>
+              </div>
+            </div>
+          `;
+          document.body.appendChild(overlay);
+
+          titleEl = overlay.querySelector('[data-role="title"]');
+          outputEl = overlay.querySelector('[data-role="output"]');
+          inputEl = overlay.querySelector('[data-role="input"]');
+          sendBtn = overlay.querySelector('[data-action="send"]');
+          ctrlCBtn = overlay.querySelector('[data-action="ctrl-c"]');
+          attachBtn = overlay.querySelector('[data-action="attach"]');
+          const shortcutsEl = overlay.querySelector('[data-role="shortcuts"]');
+          if (shortcutsEl) shortcutsEl.setAttribute('aria-hidden', 'true');
+
+          const closeBtn = overlay.querySelector('[data-action="close"]');
+          closeBtn?.addEventListener('click', () => closeOverlay());
+          overlay.addEventListener('mousedown', (e) => {
+            if (e.target === overlay) {
+              e.preventDefault();
+              closeOverlay();
+            }
+          });
+
+          ctrlCBtn?.addEventListener('click', () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            try {
+              const ctrlC = window.btoa(String.fromCharCode(3));
+              queueOrSend({ type: 'input', base64: ctrlC });
+              setStatus('Ctrl+C を送信しました', 'info');
+            } catch (err) {
+              console.warn('Failed to send Ctrl+C', err);
+            }
+          });
+
+          attachBtn?.addEventListener('click', () => {
+            if (!attachBtn) return;
+            attachBtn.disabled = true;
+            Promise.resolve(requestItermAttach())
+              .catch(() => {})
+              .finally(() => { attachBtn.disabled = false; });
+          });
+
+          sendBtn?.addEventListener('click', () => {
+            if (!inputEl) return;
+            const value = inputEl.value;
+            if (!value.trim()) return;
+            inputEl.value = '';
+            sendInputValue(value);
+          });
+
+          inputEl?.addEventListener('keydown', (e) => {
+            if (e.isComposing || e.keyCode === 229) return;
+            if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+              e.preventDefault();
+              const value = inputEl.value;
+              if (!value.trim()) return;
+              inputEl.value = '';
+              sendInputValue(value);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              closeOverlay();
+            }
+          });
+
+          document.addEventListener('keydown', (e) => {
+            if (!overlay.classList.contains('visible')) return;
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              closeOverlay();
+            }
+          });
+        }
+
+        function setStatus(text, variant = 'info') {
+          const message = text ? String(text).trim() : '';
+          if (!message) return;
+          commitLine(`Status: ${message}`);
+        }
+
+        async function requestItermAttach() {
+          try {
+            const backendBase = await probeBackendBase();
+            if (!backendBase) {
+              throw new Error('backend_unreachable');
+            }
+            const endpoint = `${backendBase.replace(/\/$/, '')}/api/pty/open-iterm`;
+            const res = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            });
+            let payload = null;
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+              try {
+                payload = await res.json();
+              } catch (_) {
+                payload = null;
+              }
+            } else {
+              try {
+                payload = await res.text();
+              } catch (_) {
+                payload = null;
+              }
+            }
+            if (!res.ok || (payload && payload.success === false)) {
+              const detail = payload && typeof payload === 'object' && payload !== null
+                ? (payload.error || payload.message)
+                : null;
+              throw new Error(detail || `HTTP ${res.status}`);
+            }
+            setStatus('iTerm を起動しました', 'success');
+          } catch (err) {
+            console.warn('Failed to open iTerm from terminal overlay', err);
+            setStatus('iTerm の起動に失敗しました', 'error');
+            throw err;
+          }
+        }
+
+        function clearOutput() {
+          outputLines = [];
+          currentLine = '';
+          renderOutput();
+        }
+
+        function appendOutput(rawText) {
+          if (!outputEl) return;
+          const chunk = normalizeTerminalOutput(String(rawText || ''));
+          if (!chunk) return;
+          for (let i = 0; i < chunk.length; i += 1) {
+            const ch = chunk[i];
+            if (ch === '\r') {
+              currentLine = '';
+              continue;
+            }
+            if (ch === '\n') {
+              commitLine(currentLine);
+              currentLine = '';
+              continue;
+            }
+            currentLine += ch;
+          }
+          trimOutput();
+          renderOutput();
+        }
+
+        function decodeBase64ToText(value) {
+          if (typeof value !== 'string' || !value) return '';
+          try {
+            const binary = window.atob(value);
+            if (!decoder) return binary;
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i += 1) bytes[i] = binary.charCodeAt(i);
+            return decoder.decode(bytes);
+          } catch (err) {
+            console.warn('Failed to decode base64 payload', err);
+            return '';
+          }
+        }
+
+        function queueOrSend(payload) {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            pendingQueue.push(payload);
+            return;
+          }
+          try {
+            ws.send(JSON.stringify(payload));
+          } catch (err) {
+            console.warn('Failed to send payload through WebSocket', err);
+          }
+        }
+
+        function flushPending() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          while (pendingQueue.length) {
+            const payload = pendingQueue.shift();
+            try {
+              ws.send(JSON.stringify(payload));
+            } catch (err) {
+              console.warn('Failed to flush pending payload', err);
+              break;
+            }
+          }
+        }
+
+        function closeConnection({ notifyServer = true } = {}) {
+          if (!ws) return;
+          try {
+            if (notifyServer && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'close' }));
+            }
+          } catch (_) {}
+          try {
+            ws.close();
+          } catch (_) {}
+          ws = null;
+          sessionId = null;
+          isReady = false;
+          pendingQueue = [];
+          pendingSendQueue = [];
+        }
+
+        function closeOverlay() {
+          if (!overlay) return;
+          overlay.classList.remove('visible');
+          closeConnection({ notifyServer: true });
+        }
+
+        function handleSocketMessage(message) {
+          if (!message || typeof message !== 'object') return;
+          switch (message.type) {
+            case 'starting':
+              sessionId = message.sessionId || sessionId;
+              appendOutput(`\n[server] starting ${message.command || ''} ${Array.isArray(message.args) ? message.args.join(' ') : ''}\n`);
+              setStatus('セッションを起動しています...', 'info');
+              break;
+            case 'ready':
+              sessionId = message.sessionId || sessionId;
+              isReady = true;
+              setStatus('ターミナルの準備が整いました', 'success');
+              if (inputEl) {
+                inputEl.disabled = false;
+                inputEl.focus();
+              }
+              if (sendBtn) sendBtn.disabled = false;
+              if (ctrlCBtn) ctrlCBtn.disabled = false;
+              flushPending();
+              if (pendingInitialInput && pendingInitialInput.trim()) {
+                queueOrSend({ type: 'input', data: pendingInitialInput, appendNewline: true });
+                pendingInitialInput = '';
+                flushPending();
+              }
+              if (pendingSendQueue.length) {
+                pendingSendQueue.forEach(value => {
+                  queueOrSend({ type: 'input', data: value, appendNewline: !value.endsWith('\n') && !value.endsWith('\r') });
+                });
+                pendingSendQueue = [];
+                flushPending();
+              }
+              break;
+            case 'output':
+              if (typeof message.data === 'string' && message.data) {
+                const text = decodeBase64ToText(message.data);
+                if (text) appendOutput(text);
+              }
+              break;
+            case 'error':
+              setStatus(message.message || 'エラーが発生しました', 'error');
+              appendOutput(`\n[error] ${message.message || '未知のエラー'}\n`);
+              break;
+            case 'exit':
+              setStatus(`プロセスが終了しました (code=${message.exitCode ?? 'null'}${message.signal != null ? `, signal=${message.signal}` : ''})`, 'info');
+              if (inputEl) inputEl.disabled = true;
+              if (sendBtn) sendBtn.disabled = true;
+              if (ctrlCBtn) ctrlCBtn.disabled = true;
+              break;
+            case 'pong':
+              break;
+            default:
+              console.log('Unhandled PTY message', message);
+          }
+        }
+
+        function sendInputValue(value) {
+          if (!value) return;
+          if (!isReady) {
+            pendingSendQueue.push(value);
+            setStatus('待機中: セッション準備後に送信されます', 'info');
+            commitLine(`[you] ${value}`);
+            trimOutput();
+            renderOutput();
+            return;
+          }
+          commitLine(`[you] ${value}`);
+          trimOutput();
+          renderOutput();
+          queueOrSend({ type: 'input', data: value, appendNewline: !value.endsWith('\n') && !value.endsWith('\r') });
+        }
+
+        async function open(command, options = {}) {
+          ensureOverlay();
+          overlay.classList.add('visible');
+          currentCommand = command;
+          pendingInitialInput = typeof options.initialInput === 'string' ? options.initialInput.trim() : '';
+          pendingQueue = [];
+          pendingSendQueue = [];
+          isReady = false;
+          if (inputEl) {
+            inputEl.value = '';
+            inputEl.disabled = true;
+          }
+          if (sendBtn) sendBtn.disabled = true;
+          if (ctrlCBtn) ctrlCBtn.disabled = true;
+          clearOutput();
+          appendOutput(`[client] Connecting to @${command}...\n`);
+          setStatus('バックエンドと接続中...', 'info');
+          closeConnection({ notifyServer: true });
+
+          if (titleEl) titleEl.textContent = `@${command}`;
+
+          try {
+            const backendBase = await probeBackendBase();
+            const wsUrl = buildBackendWebSocketUrl(backendBase, '/ws/pty');
+            ws = new WebSocket(wsUrl);
+            ws.addEventListener('open', () => {
+              const payload = {
+                type: 'start',
+                command,
+                args: Array.isArray(options.args) ? options.args : undefined,
+                model: options.model,
+                profile: options.profile,
+                sandbox: options.sandbox,
+                skipGitCheck: options.skipGitCheck,
+                mcpConfigPath: options.mcpConfigPath,
+                configOverrides: options.configOverrides,
+                subcommand: options.subcommand
+              };
+              Object.keys(payload).forEach((key) => {
+                if (payload[key] === undefined || payload[key] === null) delete payload[key];
+              });
+              try {
+                ws.send(JSON.stringify(payload));
+              } catch (err) {
+                setStatus('セッション開始要求の送信に失敗しました', 'error');
+              }
+            });
+            ws.addEventListener('message', (event) => {
+              try {
+                const data = typeof event.data === 'string' ? event.data : decoder ? decoder.decode(event.data) : String(event.data);
+                const message = JSON.parse(data);
+                handleSocketMessage(message);
+              } catch (err) {
+                console.warn('Failed to parse WebSocket message', err);
+              }
+            });
+            ws.addEventListener('error', () => {
+              setStatus('WebSocketエラーが発生しました', 'error');
+              appendOutput('\n[error] WebSocket error\n');
+            });
+            ws.addEventListener('close', (event) => {
+              const code = event && typeof event.code === 'number' ? event.code : 0;
+              const reason = event && typeof event.reason === 'string' && event.reason ? ` (${event.reason})` : '';
+              setStatus(code === 1000 ? 'セッションが終了しました' : `接続が終了しました (code ${code})${reason}`, code === 1000 ? 'info' : 'error');
+              if (inputEl) inputEl.disabled = true;
+              if (sendBtn) sendBtn.disabled = true;
+              if (ctrlCBtn) ctrlCBtn.disabled = true;
+              ws = null;
+            });
+          } catch (err) {
+            setStatus('WebSocket接続に失敗しました', 'error');
+            appendOutput(`\n[error] ${err && err.message ? err.message : err}\n`);
+          }
+        }
+
+        return {
+          open,
+          close: closeOverlay
+        };
+      }
+
+      const terminalManager = createTerminalManager();
 
       function formatDayKey(date) {
         return dayKeyFormatter.format(date);
@@ -2069,7 +2548,15 @@ async function initDocMenuTable() {
           createdAt: task.createdAt || null,
           updatedAt: task.updatedAt || null,
           model: typeof task.model === 'string' ? task.model : null,
-          provider: typeof task.provider === 'string' ? task.provider : null,
+        provider: typeof task.provider === 'string' ? task.provider : null,
+          externalTerminal: task.externalTerminal && task.externalTerminal.sessionId
+            ? {
+                sessionId: String(task.externalTerminal.sessionId),
+                app: task.externalTerminal.app || null,
+                command: task.externalTerminal.command || null,
+                appleSessionId: task.externalTerminal.appleSessionId || null
+              }
+            : null,
           logs
         };
       }
@@ -2089,6 +2576,14 @@ async function initDocMenuTable() {
           updatedAt: record.updatedAt || null,
           model: record.model || null,
           provider: record.provider || null,
+          externalTerminal: record.externalTerminal && record.externalTerminal.sessionId
+            ? {
+                sessionId: String(record.externalTerminal.sessionId),
+                app: record.externalTerminal.app || null,
+                command: record.externalTerminal.command || null,
+                appleSessionId: record.externalTerminal.appleSessionId || null
+              }
+            : null,
           logs: Array.isArray(record.logs)
             ? record.logs.map(log => {
                 const text = String(log);
@@ -2157,6 +2652,10 @@ async function initDocMenuTable() {
           if (!raw) return;
           const saved = JSON.parse(raw);
           if (!saved || typeof saved !== 'object') return;
+          if (saved.version !== STORAGE_VERSION) {
+            localStorage.removeItem(STORAGE_KEY);
+            return;
+          }
           if (typeof saved.open === 'boolean') state.open = saved.open;
           if (typeof saved.backendBase === 'string' && saved.backendBase) {
             state.backendBase = saved.backendBase;
@@ -2201,7 +2700,19 @@ async function initDocMenuTable() {
         }
       }
 
+      function ensureRequiredModelOptions() {
+        const ensure = (blueprint) => {
+          if (!blueprint || !blueprint.id) return;
+          if (!state.modelOptions.some(opt => opt.id === blueprint.id)) {
+            state.modelOptions.push({ ...blueprint });
+          }
+        };
+        MODEL_BLUEPRINTS.forEach(ensure);
+      }
+
+      ensureRequiredModelOptions();
       loadPersistedState();
+      ensureRequiredModelOptions();
       ensureActiveModel();
 
       window.addEventListener('beforeunload', () => {
@@ -2251,11 +2762,7 @@ async function initDocMenuTable() {
 
       function buildModelPayload(model) {
         if (!model || typeof model !== 'object') return { selectedModel: null };
-        const payload = { selectedModel: model.id };
-        if (model.defaultPayload && typeof model.defaultPayload === 'object') {
-          Object.assign(payload, model.defaultPayload);
-        }
-        return payload;
+        return { selectedModel: model.id };
       }
 
     const params = new URLSearchParams(location.search);
@@ -2473,8 +2980,69 @@ async function initDocMenuTable() {
             return base;
           }
         } catch(_) {}
+    }
+    return state.backendBase;
+  }
+
+
+    async function launchCodexTerminalSession(prompt, modelOption){
+      const base = await probeBackendBase();
+      const payload = {
+        action: 'launch',
+        prompt: typeof prompt === 'string' ? prompt : '',
+        model: modelOption && modelOption.id ? modelOption.id : null
+      };
+      const res = await fetch(`${base.replace(/\/$/, '')}/api/terminal/codex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const data = await res.json();
+          detail = data && (data.message || data.error) ? (data.message || data.error) : '';
+        } catch (_) {
+          detail = await res.text().catch(() => '') || '';
+        }
+        const message = detail ? `${res.status} ${detail}` : `HTTP ${res.status}`;
+        throw new Error(message);
       }
-      return state.backendBase;
+      const data = await res.json();
+      if (!data || !data.sessionId) {
+        throw new Error('invalid_response');
+      }
+      return data;
+    }
+
+    async function focusCodexTerminalSession(sessionId){
+      if (!sessionId) return;
+      const base = await probeBackendBase();
+      const res = await fetch(`${base.replace(/\/$/, '')}/api/terminal/codex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'focus', sessionId })
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const data = await res.json();
+          detail = data && (data.message || data.error) ? (data.message || data.error) : '';
+        } catch (_) {
+          detail = await res.text().catch(() => '') || '';
+        }
+        const message = detail ? `${res.status} ${detail}` : `HTTP ${res.status}`;
+        throw new Error(message);
+      }
+    }
+
+    async function focusExternalTerminalTask(task) {
+      if (!task || !task.externalTerminal || !task.externalTerminal.sessionId) return;
+      try {
+        await focusCodexTerminalSession(task.externalTerminal.sessionId);
+      } catch (err) {
+        console.error('Failed to focus terminal session', err);
+      }
     }
 
 
@@ -2626,6 +3194,7 @@ async function initDocMenuTable() {
     }
 
     function renderModelDialItems(itemsContainer, searchQuery = '') {
+      ensureRequiredModelOptions();
       const dialInput = document.getElementById('mcpDialInput');
       if (dialInput) {
         dialInput.placeholder = 'モデルを検索...';
@@ -2640,6 +3209,8 @@ async function initDocMenuTable() {
             const base = `${model.id || ''} ${model.label || ''} ${model.shortLabel || ''} ${model.description || ''} ${model.provider || ''}`.toLowerCase();
             return base.includes(q);
           });
+
+      console.log('[TaskBoard] renderModelDialItems options:', state.modelOptions.map(opt => opt.id));
 
       const tooltip = getTooltipElement();
       if (tooltip) {
@@ -2922,12 +3493,14 @@ async function initDocMenuTable() {
       if (s === 'running') return 'doing';
       if (s === 'completed') return 'done';
       if (s === 'failed') return 'done';
+      if (s === 'external') return 'doing';
       return 'todo';
     }
     function iconFor(s){
       if (s === 'running') return '⏳';
       if (s === 'completed') return '✔';
       if (s === 'failed') return '×';
+      if (s === 'external') return '🖥';
       return '';
     }
 
@@ -2968,10 +3541,89 @@ async function initDocMenuTable() {
       cleanupTasksAndLogs();
       schedulePersist();
     }
+
+    function handleInlineCommand(rawText) {
+      const trimmed = typeof rawText === 'string' ? rawText.trim() : '';
+      if (!trimmed || trimmed.charAt(0) !== '@') return false;
+      const match = trimmed.match(/^@([a-zA-Z0-9_-]+)(?:\s+(.*))?$/);
+      if (!match) return false;
+      const commandId = match[1].toLowerCase();
+      const rest = match[2] ? match[2].trim() : '';
+      if (commandId === 'claude' || commandId === 'codex') {
+        const options = { initialInput: rest };
+        Promise.resolve(terminalManager.open(commandId, options)).catch((err) => {
+          console.error('[Terminal] Failed to open PTY session', err);
+        });
+        return true;
+      }
+      return false;
+    }
+
     async function submitRemoteTask(text){
-      const prompt = String(text||'').trim();
-      if (!prompt) return;
+      const rawInput = typeof text === 'string' ? text : '';
+      const prompt = rawInput.trim();
       const selectedModel = getActiveModelOption();
+      const isExternalModel = selectedModel && selectedModel.externalTerminalType === 'codex-iterm';
+      if (!prompt && !isExternalModel) return;
+      if (prompt && handleInlineCommand(prompt)) return;
+      if (isExternalModel) {
+        try {
+          const result = await launchCodexTerminalSession(prompt, selectedModel);
+          const now = new Date().toISOString();
+          const sessionId = result && result.sessionId ? String(result.sessionId) : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          const displayPrompt = prompt || '@Codex+terminal';
+          const task = {
+            id: sessionId,
+            status: 'external',
+            prompt: displayPrompt,
+            createdAt: now,
+            updatedAt: now,
+            response: '',
+            result: null,
+            error: null,
+            model: selectedModel.id,
+            provider: selectedModel.provider || null,
+            externalTerminal: {
+              sessionId,
+              app: result && result.app ? String(result.app) : 'iTerm',
+              command: result && result.command ? String(result.command) : 'codex',
+              appleSessionId: result && result.appleSessionId ? String(result.appleSessionId) : null
+            },
+            logs: []
+          };
+          mergeTask(task);
+          render();
+        } catch (err) {
+          const now = new Date().toISOString();
+          const message = err && err.message ? err.message : String(err || 'unknown_error');
+          const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          const task = {
+            id: tempId,
+            status: 'failed',
+            prompt: prompt || '@Codex+terminal',
+            createdAt: now,
+            updatedAt: now,
+            response: '',
+            result: null,
+            error: `Codexターミナルの起動に失敗: ${message}`,
+            model: selectedModel ? selectedModel.id : null,
+            provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
+            logs: []
+          };
+          mergeTask(task);
+          render();
+        }
+        return;
+      }
+      if (selectedModel && selectedModel.ptyCommand) {
+        const commandId = selectedModel.ptyCommand;
+        const inlinePrompt = prompt ? `@${commandId} ${prompt}` : `@${commandId}`;
+        if (!handleInlineCommand(inlinePrompt)) {
+          Promise.resolve(terminalManager.open(commandId, { initialInput: prompt }))
+            .catch((err) => console.error('[Terminal] Failed to open PTY session via model shortcut', err));
+        }
+        return;
+      }
       const modelId = selectedModel ? selectedModel.id : null;
       const now = new Date().toISOString();
       const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -3083,7 +3735,8 @@ async function initDocMenuTable() {
         : state.tasks.slice());
 
       const cardsHtml = tasksToRender.map(t => {
-        const s = t.status || 'running';
+        const isExternal = !!(t && t.externalTerminal && t.externalTerminal.sessionId);
+        const s = t && typeof t.status === 'string' && t.status ? t.status : (isExternal ? 'external' : 'running');
         const cls = cssStatus(s);
         const icon = iconFor(s);
         const title = escapeHtml(t.prompt || '');
@@ -3091,6 +3744,17 @@ async function initDocMenuTable() {
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
         const items = [];
+
+        if (isExternal && t.externalTerminal && t.externalTerminal.sessionId) {
+          const terminalLabel = t.externalTerminal.app ? String(t.externalTerminal.app) : 'ターミナル';
+          const sessionIdAttr = escapeHtml(String(t.externalTerminal.sessionId));
+          const terminalTitle = `${terminalLabel} を前面に表示`;
+          const buttonLabel = `${terminalLabel}を開く`;
+          items.push(`<span class="tb-meta-item" data-action="focus-terminal" data-session="${sessionIdAttr}" title="${escapeHtml(terminalTitle)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(148, 163, 184, 0.18);transition:background 0.2s;">
+            <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#38bdf8;"><path fill="currentColor" d="M4 5a2 2 0 0 0-2 2v9c0 1.105.895 2 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H4Zm0 2h16v9H4V7Zm2 2v2h6V9H6Zm0 4v2h4v-2H6Z"/></svg>
+            <span>${escapeHtml(buttonLabel)}</span>
+          </span>`);
+        }
 
         const chosenModel = (() => {
           if (t.model) {
@@ -3149,13 +3813,16 @@ async function initDocMenuTable() {
         const createdAt = t.createdAt ? new Date(t.createdAt).getTime() : Date.now();
         const elapsed = Date.now() - createdAt;
         const progressPct = Math.max(0, Math.min(100, Math.round((elapsed / 300000) * 100)));
-        const showProgress = s === 'running';
+        const showProgress = s === 'running' && !isExternal;
         const startedAt = formatTaskTimestamp(t.createdAt);
         const finishedAt = !showProgress ? formatTaskTimestamp(t.updatedAt) : null;
-        
+
         // 経過時間に応じてステータステキストを変更
         let statusText = '';
-        if (showProgress) {
+        if (isExternal) {
+          const terminalLabel = t.externalTerminal && t.externalTerminal.app ? t.externalTerminal.app : 'ターミナル';
+          statusText = `${terminalLabel} で操作中`;
+        } else if (showProgress) {
           if (elapsed < 60000) {
             statusText = 'プロンプトを強化しています...';
           } else if (elapsed < 180000) {
@@ -3166,7 +3833,7 @@ async function initDocMenuTable() {
         } else if (!items.length) {
           statusText = t.error ? String(t.error) : s;
         }
-        
+
         const serverIdAttr = t.serverId ? escapeHtml(String(t.serverId)) : '';
         const cacheKey = escapeHtml(String(t.serverId || t.id));
         return `
@@ -3223,6 +3890,10 @@ async function initDocMenuTable() {
         if (card.dataset.logsBound === '1') return;
         card.dataset.logsBound = '1';
         const localId = card.getAttribute('data-id') || '';
+        const taskRef = localId ? state.tasks.find(t => String(t.id) === String(localId)) : null;
+        if (taskRef && taskRef.externalTerminal && taskRef.externalTerminal.sessionId) {
+          return;
+        }
         const serverIdAttr = card.getAttribute('data-server-id') || '';
         const fetchableId = serverIdAttr && serverIdAttr.trim() ? serverIdAttr.trim() : null;
         const cacheKey = card.getAttribute('data-cache-key') || fetchableId || localId;
@@ -3476,8 +4147,10 @@ async function initDocMenuTable() {
       const any = e.target.closest('.task-item');
       if (!any) return; const id = any.getAttribute('data-id');
       if (!id) return;
-      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"]');
+      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"],[data-action="focus-terminal"]');
       try {
+        const task = state.tasks.find(t => String(t.id) === String(id));
+        if (!task) throw new Error('task not found');
         if (actionEl) {
           const action = actionEl.getAttribute('data-action');
           if (action === 'open-url') {
@@ -3542,9 +4215,20 @@ async function initDocMenuTable() {
             }
             return;
           }
+          if (action === 'focus-terminal') {
+            const encodedSession = actionEl.getAttribute('data-session');
+            const sessionId = encodedSession && encodedSession.trim() ? encodedSession.trim() : null;
+            if (sessionId) {
+              await focusExternalTerminalTask(task);
+            }
+            return;
+          }
         }
-        const task = state.tasks.find(t => String(t.id) === String(id));
-        if (!task) throw new Error('task not found');
+
+        if (task.externalTerminal && task.externalTerminal.sessionId) {
+          await focusExternalTerminalTask(task);
+          return;
+        }
         
         // AIチャット履歴を含む完全な情報
         const fullData = {
@@ -3622,5 +4306,5 @@ document.addEventListener('DOMContentLoaded', () => {
   initImageModals();
   initContextMenu();
   initDocMenuTable();
-  initTaskBoard();
+initTaskBoard();
 });
