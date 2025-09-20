@@ -155,6 +155,70 @@ const PTY_ALLOWED_COMMANDS = new Set(['claude', 'codex']);
 const ptyWebsocketContexts = new Set();
 const MAX_WS_MESSAGE_BYTES = 2 * 1024 * 1024; // 2MB safety cap for incoming frames
 const terminalSessions = new Map();
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const hasMeaningfulText = (text) => typeof text === 'string' && /[A-Za-z0-9\u3040-\u30FF\u3400-\u9FFF]/.test(text);
+const SUMMARY_MIN_CAPTURE_MS = 20000;
+const SUMMARY_MAX_CAPTURE_MS = 60000;
+
+function cleanTerminalSummary(raw, promptText) {
+    if (!raw) return '';
+    let text = raw.replace(/\u001B\[[0-9;?]*[A-Za-z]/g, '').replace(/\r/g, '');
+    const normalizedPrompt = promptText ? promptText.trim().replace(/\r/g, '') : '';
+    if (normalizedPrompt) {
+        const idx = text.indexOf(normalizedPrompt);
+        if (idx !== -1) {
+            text = text.slice(idx + normalizedPrompt.length);
+        }
+    }
+    const promptLines = normalizedPrompt
+        ? normalizedPrompt.split('\n').map(line => line.trim()).filter(Boolean)
+        : [];
+    const promptLineSet = new Set(promptLines);
+    const lines = text.split('\n');
+    const filtered = [];
+    for (let line of lines) {
+        const trimEnd = line.replace(/\s+$/g, '');
+        const trimmed = trimEnd.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith('▌')) break;
+        if (/<<<KAMUI_SUMMARY_\d+>>>/.test(trimmed)) continue;
+        const lineWithoutPromptMarker = trimmed.replace(/^>+\s?/, '').trim();
+        if (promptLineSet.has(trimmed) || promptLineSet.has(lineWithoutPromptMarker)) continue;
+        if (/^'+$/.test(trimmed)) continue;
+        if (/^(send|⌫|↵|⇧|token|Esc\b|Prompt:|stdout:|stderr:|Stdout:|Stderr:|>>?>|~)/i.test(trimmed)) continue;
+        if (/transcript|newline|token usage|Ctrl\+|^\^/i.test(trimmed) && trimmed.length <= 60) continue;
+        // 追加のノイズフィルタ
+        if (/^(Type|Press|Click|Enter|Return|Tab|Space|Delete|Backspace|Arrow)/i.test(trimmed)) continue;
+        if (/^(printf|echo|cat|ls|cd|pwd|exit|clear)/i.test(trimmed) && trimmed.length <= 30) continue;
+        if (/^\[\d+m|\x1b\[/i.test(trimmed)) continue; // ANSIエスケープシーケンス
+        if (/^(OK|Done|Complete|Finished|Success|Failed|Error:|Warning:)/i.test(trimmed) && trimmed.length <= 20) continue;
+        filtered.push(trimEnd);
+    }
+    let result = filtered.join('\n').trim();
+    if (!hasMeaningfulText(result)) {
+        const fallback = lines
+            .map(line => line.replace(/^\s*>+\s?/, '').trim())
+            .filter(line => line)
+            .filter(line => !promptLineSet.has(line))
+            .filter(line => !/<<<KAMUI_SUMMARY_\d+>>>/.test(line))
+            .filter(line => !/^'+$/.test(line))
+            .filter(line => !(/^(send|⌫|↵|⇧|token|Esc\b|Prompt:|stdout:|stderr:|Stdout:|Stderr:|>>?>|~)/i.test(line)))
+            .filter(line => !( /transcript|newline|token usage|Ctrl\+|^\^/i.test(line) && line.length <= 60));
+        const fallbackText = fallback.join('\n').trim();
+        result = hasMeaningfulText(fallbackText) ? fallbackText : '';
+    }
+    return result;
+}
+
+function summarizePromptForTab(prompt, maxLength = 48) {
+    if (!prompt || typeof prompt !== 'string') return '';
+    const normalized = prompt.replace(/\s+/g, ' ').trim();
+    if (!normalized) return '';
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength - 3)}...`;
+}
+
+const CODEX_JAPANESE_INSTRUCTION = '日本語で対応すること。';
 function writeLogLine(line) {
     try { fs.appendFileSync(LOG_FILE_PATH, line + '\n'); } catch (_) {}
 }
@@ -495,6 +559,113 @@ async function focusItermSession(sessionId, appleSessionId = null) {
         end tell
     `;
     await runAppleScript(script);
+}
+
+async function terminateItermSession(sessionId, appleSessionId = null) {
+    const escapedId = escapeAppleScriptString(sessionId);
+    const escapedAppleId = appleSessionId ? escapeAppleScriptString(String(appleSessionId)) : null;
+    const script = `
+        tell application "iTerm"
+            set targetId to "${escapedId}"
+            ${escapedAppleId ? `set targetAppleId to "${escapedAppleId}"` : 'set targetAppleId to missing value'}
+            set closedSession to false
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if ((targetAppleId is not missing value and (id of s as string) is equal to targetAppleId) or (name of s contains targetId)) then
+                            try
+                                tell s to terminate
+                            end try
+                            delay 0.1
+                            try
+                                tell s to write text "exit"
+                            end try
+                            delay 0.1
+                            try
+                                close s
+                            on error
+                                try
+                                    close t
+                                end try
+                            end try
+                            set closedSession to true
+                            exit repeat
+                        end if
+                    end repeat
+                    if closedSession then exit repeat
+                end repeat
+                if closedSession then exit repeat
+            end repeat
+            if closedSession then
+                return "terminated"
+            else
+                error "session_not_found"
+            end if
+        end tell
+    `;
+    await runAppleScript(script, { captureOutput: true });
+}
+
+async function sendTextToItermSession(sessionId, appleSessionId = null, text = '') {
+    if (sessionId == null) return;
+    const rawText = text == null ? '' : (typeof text === 'string' ? text : String(text));
+    const escapedId = escapeAppleScriptString(sessionId);
+    const escapedAppleId = appleSessionId ? escapeAppleScriptString(String(appleSessionId)) : null;
+    const hasVisibleChars = /\S/.test(rawText);
+    const escapedText = escapeAppleScriptString(rawText);
+    const writeCommand = hasVisibleChars
+        ? `tell foundSession to write text "${escapedText}"`
+        : 'tell foundSession to write text ""';
+    const script = `
+        tell application "iTerm"
+            set targetId to "${escapedId}"
+            ${escapedAppleId ? `set targetAppleId to "${escapedAppleId}"` : 'set targetAppleId to missing value'}
+            set foundSession to missing value
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if ((targetAppleId is not missing value and (id of s as string) is equal to targetAppleId) or (name of s contains targetId)) then
+                            set foundSession to s
+                            exit repeat
+                        end if
+                    end repeat
+                    if foundSession is not missing value then exit repeat
+                end repeat
+                if foundSession is not missing value then exit repeat
+            end repeat
+            if foundSession is missing value then error "session_not_found"
+            ${writeCommand}
+        end tell
+    `;
+    await runAppleScript(script, { captureOutput: false });
+}
+
+async function getItermSessionContent(sessionId, appleSessionId = null) {
+    const escapedId = escapeAppleScriptString(sessionId);
+    const escapedAppleId = appleSessionId ? escapeAppleScriptString(String(appleSessionId)) : null;
+    const script = `
+        tell application "iTerm"
+            set targetId to "${escapedId}"
+            ${escapedAppleId ? `set targetAppleId to "${escapedAppleId}"` : 'set targetAppleId to missing value'}
+            set foundSession to missing value
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if ((targetAppleId is not missing value and (id of s as string) is equal to targetAppleId) or (name of s contains targetId)) then
+                            set foundSession to s
+                            exit repeat
+                        end if
+                    end repeat
+                    if foundSession is not missing value then exit repeat
+                end repeat
+                if foundSession is not missing value then exit repeat
+            end repeat
+            if foundSession is missing value then error "session_not_found"
+            contents of foundSession
+        end tell
+    `;
+    const output = await runAppleScript(script, { captureOutput: true });
+    return typeof output === 'string' ? output : '';
 }
 
 function resolvePtyCommandConfig(payload) {
@@ -1527,14 +1698,20 @@ const server = http.createServer((req, res) => {
                     res.end(JSON.stringify({ error: 'missing_session_id' }));
                     return;
                 }
+                const providedAppleId = payload && typeof payload.appleSessionId === 'string' && payload.appleSessionId.trim()
+                    ? payload.appleSessionId.trim()
+                    : null;
                 const session = terminalSessions.get(sessionId);
                 if (!session) {
                     res.writeHead(404, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'session_not_found' }));
                     return;
                 }
+                if (providedAppleId && !session.appleSessionId) {
+                    session.appleSessionId = providedAppleId;
+                }
                 try {
-                    await focusItermSession(sessionId, session.appleSessionId || null);
+                    await focusItermSession(sessionId, providedAppleId || session.appleSessionId || null);
                     session.lastFocusedAt = new Date().toISOString();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ success: true }));
@@ -1553,6 +1730,128 @@ const server = http.createServer((req, res) => {
                 return;
             }
 
+            if (actionRaw === 'terminate') {
+                const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+                if (!sessionId) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'missing_session_id' }));
+                    return;
+                }
+                const providedAppleId = payload && typeof payload.appleSessionId === 'string' && payload.appleSessionId.trim()
+                    ? payload.appleSessionId.trim()
+                    : null;
+                const session = terminalSessions.get(sessionId);
+                const appleId = providedAppleId || (session && session.appleSessionId) || null;
+                try {
+                    await terminateItermSession(sessionId, appleId);
+                    terminalSessions.delete(sessionId);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true }));
+                } catch (err) {
+                    const message = err && err.message ? err.message : String(err || 'terminate_failed');
+                    if (/session_not_found/i.test(message)) {
+                        terminalSessions.delete(sessionId);
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'session_not_found' }));
+                    } else {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'terminate_failed', message }));
+                    }
+                }
+                return;
+            }
+
+            if (actionRaw === 'summary') {
+                const basePrompt = payload && typeof payload.basePrompt === 'string' ? payload.basePrompt : null;
+                const taskPrompt = payload && typeof payload.taskPrompt === 'string' ? payload.taskPrompt : null;
+                const sessionIdForSummary = payload && typeof payload.sessionId === 'string' ? payload.sessionId.trim() : null;
+                const appleSessionIdForSummary = payload && typeof payload.appleSessionId === 'string' ? payload.appleSessionId.trim() : null;
+                const safeBase = basePrompt && basePrompt.trim().length ? basePrompt.trim() : '完了済みにする際に自動でterminalにこれまでの作業をまとめて、特に編集、生成したファイルパスを必ず記述すること';
+                const promptLines = [safeBase];
+                if (taskPrompt && taskPrompt.trim()) {
+                    promptLines.push(`参考: 元のタスク/プロンプト\n${taskPrompt.trim()}`);
+                }
+                promptLines.push('出力は日本語で記述してください。');
+                const promptText = promptLines.join('\n\n');
+                let summary = '';
+                if (process.platform === 'darwin' && sessionIdForSummary) {
+                try {
+                    const sentinel = `<<<KAMUI_SUMMARY_${Date.now()}>>>`;
+                    await sendTextToItermSession(sessionIdForSummary, appleSessionIdForSummary, `printf '${sentinel}\\n'`);
+                    let baseline = await getItermSessionContent(sessionIdForSummary, appleSessionIdForSummary) || '';
+                    const sentinelDeadline = Date.now() + 5000;
+                    while (!baseline.includes(sentinel) && Date.now() < sentinelDeadline) {
+                        await sleep(400);
+                        baseline = await getItermSessionContent(sessionIdForSummary, appleSessionIdForSummary) || '';
+                    }
+                    // プロンプトを送信し、少し待機してから改行を送信
+                    await sendTextToItermSession(sessionIdForSummary, appleSessionIdForSummary, promptText);
+                    await sleep(300); // プロンプトが完全に入力されるのを待つ
+                    await sendTextToItermSession(sessionIdForSummary, appleSessionIdForSummary, ''); // 改行を送信してプロンプトを実行
+                    let bestCapture = '';
+                    let lastCapture = '';
+                    let stableCount = 0;
+                    let meaningfulContentFound = false;
+                    const captureStart = Date.now();
+                    const minCompleteAt = captureStart + SUMMARY_MIN_CAPTURE_MS;
+                    const deadline = captureStart + SUMMARY_MAX_CAPTURE_MS;
+                    
+                    // 最初の意味のあるコンテンツが見つかるまでのタイムアウト
+                    const firstContentTimeout = captureStart + 30000; // 30秒
+                    
+                    while (Date.now() < deadline) {
+                        await sleep(800);
+                        const latest = await getItermSessionContent(sessionIdForSummary, appleSessionIdForSummary) || '';
+                        if (!latest.includes(sentinel)) continue;
+                        const markerIndex = latest.lastIndexOf(sentinel);
+                        if (markerIndex === -1) continue;
+                        const rawDiff = latest.slice(markerIndex + sentinel.length);
+                        const cleaned = cleanTerminalSummary(rawDiff, promptText);
+                        
+                        if (!cleaned) {
+                            // まだ意味のあるコンテンツが見つかっていない場合、タイムアウトをチェック
+                            if (!meaningfulContentFound && Date.now() > firstContentTimeout) {
+                                console.log('[Terminal] No meaningful content found within 30 seconds, continuing...');
+                            }
+                            continue;
+                        }
+                        
+                        if (cleaned === lastCapture) {
+                            stableCount += 1;
+                        } else {
+                            lastCapture = cleaned;
+                            stableCount = 1;
+                        }
+                        
+                        if (hasMeaningfulText(cleaned)) {
+                            bestCapture = cleaned;
+                            meaningfulContentFound = true;
+                        }
+                        
+                        // 終了条件：
+                        // 1. 意味のあるコンテンツが見つかっている
+                        // 2. 最小待機時間（20秒）が経過している
+                        // 3. 出力が安定している（3回以上同じ内容）
+                        if (meaningfulContentFound && stableCount >= 3 && Date.now() >= minCompleteAt) {
+                            console.log(`[Terminal] Summary capture complete after ${Math.round((Date.now() - captureStart) / 1000)}s`);
+                            break;
+                        }
+                    }
+                    if (hasMeaningfulText(bestCapture)) {
+                        summary = bestCapture;
+                    }
+                } catch (err) {
+                    console.warn('[Terminal] Failed to capture terminal summary:', err.message);
+                }
+                }
+                if (!summary) {
+                    summary = '完了プロンプトを送信しましたが、ターミナルからの応答を取得できませんでした。必要に応じて手動で追記してください。';
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ summary }));
+                return;
+            }
+
             if (process.platform !== 'darwin') {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'unsupported_platform' }));
@@ -1560,7 +1859,17 @@ const server = http.createServer((req, res) => {
             }
 
             const sessionId = createTerminalSessionId();
-            const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+            const rawPrompt = typeof payload.prompt === 'string' ? payload.prompt : '';
+            const prompt = rawPrompt.trim();
+            const linesToSend = [];
+            if (prompt) linesToSend.push(prompt);
+            if (!prompt || !/日本語で対応すること/.test(prompt)) {
+                linesToSend.push(CODEX_JAPANESE_INSTRUCTION);
+            }
+            const promptSegments = linesToSend.map(line => `"${escapeAppleScriptString(line)}"`);
+            const promptExpression = promptSegments.length
+                ? (promptSegments.length === 1 ? promptSegments[0] : promptSegments.join(' & return & '))
+                : null;
             const customArgs = Array.isArray(payload.args)
                 ? payload.args.filter(arg => typeof arg === 'string' && arg.trim() !== '')
                 : [];
@@ -1573,10 +1882,12 @@ const server = http.createServer((req, res) => {
                 : PROJECT_ROOT;
             const resolvedCwd = cwdCandidate.startsWith('/') ? cwdCandidate : PROJECT_ROOT;
 
-            const sessionLabel = `@Codex+terminal:${sessionId}`;
+            const sessionLookupToken = `@Codex+terminal:${sessionId}`;
+            const summarySeed = prompt || CODEX_JAPANESE_INSTRUCTION;
+            const promptSummary = summarizePromptForTab(summarySeed);
+            const sessionLabel = promptSummary ? `${promptSummary} :: ${sessionLookupToken}` : sessionLookupToken;
             const escapedLabel = escapeAppleScriptString(sessionLabel);
             const escapedCommand = escapeAppleScriptString(commandArgs);
-            const escapedPrompt = escapeAppleScriptString(prompt);
             const escapedCwdForAppleScript = escapeAppleScriptString(resolvedCwd);
 
             const scriptLines = [
@@ -1603,9 +1914,20 @@ const server = http.createServer((req, res) => {
             scriptLines.push(`        write text "cd " & quoted form of "${escapedCwdForAppleScript}"`);
             scriptLines.push(`        write text "${escapedCommand}"`);
             scriptLines.push('    end tell');
-            if (prompt) {
-                scriptLines.push('    delay 0.5');
-                scriptLines.push(`    tell theSession to write text "${escapedPrompt}"`);
+            if (promptExpression) {
+                scriptLines.push('    delay 1.0');
+                scriptLines.push(`    tell theSession to write text (${promptExpression})`);
+                
+                // 2秒待ってから、1秒間隔で2回だけ、改行とスペースを送信
+                scriptLines.push('    delay 2.0'); // 最初は2秒待機
+                for (let i = 1; i <= 2; i++) {
+                    scriptLines.push('    tell theSession to write text ""'); // 空文字列で改行
+                    scriptLines.push('    tell theSession to write text return'); // 明示的な改行
+                    scriptLines.push('    tell theSession to write text " "'); // スペース
+                    if (i < 2) {
+                        scriptLines.push('    delay 1.0'); // 次の繰り返しまで1秒待機
+                    }
+                }
             }
             scriptLines.push('    set sessionIdentifier to id of theSession as string');
             scriptLines.push('    sessionIdentifier');
@@ -1622,7 +1944,8 @@ const server = http.createServer((req, res) => {
                     cwd: resolvedCwd,
                     createdAt: new Date().toISOString(),
                     model: payload && typeof payload.model === 'string' ? payload.model : null,
-                    appleSessionId: appleSessionId || null
+                    appleSessionId: appleSessionId || null,
+                    label: sessionLabel
                 };
                 terminalSessions.set(sessionId, sessionRecord);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2380,13 +2703,24 @@ function handlePtyClientMessage(context, message) {
         } else if (typeof message.data === 'string') {
             buffer = Buffer.from(message.data, 'utf8');
         }
-        if (!buffer || !buffer.length) return;
+        
+        // 空文字列でも改行を送信する必要がある場合の処理
+        if ((!buffer || !buffer.length) && !message.appendNewline) {
+            return; // 改行もない空のバッファは無視
+        }
+        
+        if (!buffer) {
+            buffer = Buffer.alloc(0); // 空のバッファを作成
+        }
+        
         if (buffer.length > 16 * 1024) {
             buffer = buffer.slice(0, 16 * 1024);
         }
+        
         if (message.appendNewline) {
             buffer = Buffer.concat([buffer, Buffer.from('\r', 'utf8')]);
         }
+        
         context.session.write(buffer);
         return;
     }

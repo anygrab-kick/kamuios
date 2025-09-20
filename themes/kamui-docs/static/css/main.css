@@ -105,6 +105,31 @@ body {
 .btn-icon svg { width: 100%; height: 100%; display: block; }
 .btn-label { display: inline-block; }
 
+/* Header actions */
+.header-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  margin-left: 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: #ffffff;
+  background: #4a4a4a;
+  transition: filter 0.2s ease, opacity 0.2s ease;
+}
+.header-cta--spacer { margin-left: auto; }
+.header-cta--muted { background: #4a4a4a; }
+.header-cta--danger { background: #dc2626; }
+.header-cta--primary { background: #3b82f6; }
+.header-cta:hover { filter: brightness(1.05); }
+.header-cta:disabled { opacity: 0.6; cursor: not-allowed; }
+.header-cta-icon { font-size: 1rem; line-height: 1; }
+.header-cta-label { white-space: nowrap; }
+
 /* ドキュメント本文 */
 .doc-container { flex: 1; overflow-y: auto; overflow-x: auto !important; padding: 24px; }
 /* Light mode: make the document area white */
@@ -298,6 +323,17 @@ pre.code code { color: var(--text); }
 #requirements-document .dashboard-links a.saas-app-card { min-width: 0 !important; }
 @media (max-width: 900px){
   #requirements-document .dashboard-links { grid-template-columns: 1fr !important; }
+}
+
+@media (max-width: 1200px) {
+  .header-bar .header-cta {
+    padding: 8px;
+    min-width: 38px;
+    justify-content: center;
+  }
+  .header-bar .header-cta .header-cta-label {
+    display: none;
+  }
 }
 
 /* Inspector overlay */
@@ -935,6 +971,93 @@ pre.code code { color: var(--text); }
 .task-item.done { border-color: color-mix(in srgb, #22c55e 40%, var(--border) 60%); background: color-mix(in srgb, #22c55e 12%, var(--card) 88%); }
 .task-item.done .task-status { border-color: #22c55e; background: color-mix(in srgb, #22c55e 18%, var(--input-bg) 82%); }
 .task-item.done .task-status .i { color: #22c55e; }
+.task-item.manual-done { border-color: color-mix(in srgb, #10b981 45%, var(--border) 55%); background: color-mix(in srgb, #10b981 14%, var(--card) 86%); }
+.task-item.manual-done .task-status { border-color: #10b981; background: color-mix(in srgb, #10b981 20%, var(--input-bg) 80%); }
+.task-item.manual-done .task-status .i { color: #10b981; }
+
+.tb-done-toggle {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.tb-done-toggle:hover { background: rgba(148, 163, 184, 0.2); }
+.tb-done-toggle.is-active {
+  border-color: rgba(34, 197, 94, 0.8);
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--text);
+}
+[data-theme="light"] .tb-done-toggle { background: rgba(148, 163, 184, 0.15); }
+[data-theme="light"] .tb-done-toggle.is-active { background: rgba(34, 197, 94, 0.25); }
+
+.tb-summary {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(14, 116, 144, 0.14);
+  border: 1px solid rgba(14, 116, 144, 0.25);
+}
+.tb-summary.tb-summary--pending {
+  background: rgba(14, 116, 144, 0.08);
+  border-style: dashed;
+}
+.tb-summary-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #38bdf8;
+  margin-bottom: 6px;
+}
+.tb-summary-body {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  background: transparent;
+  color: var(--text);
+  margin: 0;
+}
+.tb-summary-body--pending {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: rgba(148, 163, 184, 0.9);
+}
+.tb-summary-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.45);
+  border-top-color: rgba(56, 189, 248, 0.95);
+  animation: tb-spin 0.9s linear infinite;
+}
+
+.tb-done-toggle.is-loading {
+  position: relative;
+  pointer-events: none;
+  opacity: 0.65;
+}
+.tb-done-toggle.is-loading::after {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 6px;
+  border-radius: 50%;
+  border: 2px solid rgba(148, 163, 184, 0.6);
+  border-top-color: rgba(148, 163, 184, 0.2);
+  animation: tb-spin 0.8s linear infinite;
+}
+
+@keyframes tb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 .task-title-row {
   display: flex;

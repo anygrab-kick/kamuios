@@ -1703,6 +1703,8 @@ async function initDocMenuTable() {
         let pendingInitialInput = '';
         let currentCommand = '';
         let pendingSendQueue = [];
+        let imeComposing = false;
+        let imePendingEnter = false;
 
         const ANSI_OSC_REGEX = /\u001B\][^\u0007]*\u0007/g;
         const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-9;?]*[ -\/]*[0-~])/g;
@@ -1787,6 +1789,47 @@ async function initDocMenuTable() {
           const shortcutsEl = overlay.querySelector('[data-role="shortcuts"]');
           if (shortcutsEl) shortcutsEl.setAttribute('aria-hidden', 'true');
 
+          const isPlainEnter = (event) => {
+            return event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+          };
+
+          const submitInputFromTextarea = () => {
+            if (!inputEl) return;
+            const value = inputEl.value;
+            if (!value.trim()) {
+              imePendingEnter = false;
+              return;
+            }
+            inputEl.value = '';
+            imePendingEnter = false;
+            sendInputValue(value);
+          };
+
+          if (inputEl) {
+            inputEl.addEventListener('compositionstart', () => {
+              imeComposing = true;
+              imePendingEnter = false;
+            });
+            
+            const handleCompositionDone = () => {
+              imeComposing = false;
+              // IME確定後、わずかな遅延を置いてからEnterキーの状態を確認
+              setTimeout(() => {
+                if (imePendingEnter) {
+                  submitInputFromTextarea();
+                  imePendingEnter = false;
+                }
+              }, 50); // ブラウザがIME確定を完全に処理するための遅延
+            };
+            
+            inputEl.addEventListener('compositionend', handleCompositionDone);
+            
+            inputEl.addEventListener('compositioncancel', () => {
+              imeComposing = false;
+              imePendingEnter = false;
+            });
+          }
+
           const closeBtn = overlay.querySelector('[data-action="close"]');
           closeBtn?.addEventListener('click', () => closeOverlay());
           overlay.addEventListener('mousedown', (e) => {
@@ -1817,23 +1860,37 @@ async function initDocMenuTable() {
 
           sendBtn?.addEventListener('click', () => {
             if (!inputEl) return;
-            const value = inputEl.value;
-            if (!value.trim()) return;
-            inputEl.value = '';
-            sendInputValue(value);
+            submitInputFromTextarea();
           });
 
           inputEl?.addEventListener('keydown', (e) => {
-            if (e.isComposing || e.keyCode === 229) return;
-            if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            if (imeComposing) {
+              if (isPlainEnter(e)) {
+                imePendingEnter = true;
+              }
+              return;
+            }
+            if (isPlainEnter(e)) {
               e.preventDefault();
-              const value = inputEl.value;
-              if (!value.trim()) return;
-              inputEl.value = '';
-              sendInputValue(value);
+              submitInputFromTextarea();
             } else if (e.key === 'Escape') {
               e.preventDefault();
               closeOverlay();
+            }
+          });
+
+          inputEl?.addEventListener('keyup', (e) => {
+            // IME処理が完了していない場合でも、keyupでEnterが検出されたら処理
+            if (!imeComposing && imePendingEnter && isPlainEnter(e)) {
+              e.preventDefault();
+              imePendingEnter = false;
+              submitInputFromTextarea();
+            }
+            // IMEを使用していない場合でも、Enterキーのkeyupを処理（フォールバック）
+            else if (!imeComposing && isPlainEnter(e) && inputEl.value.trim()) {
+              // keydownイベントを逃した場合のフォールバック
+              e.preventDefault();
+              submitInputFromTextarea();
             }
           });
 
@@ -2002,9 +2059,41 @@ async function initDocMenuTable() {
               if (ctrlCBtn) ctrlCBtn.disabled = false;
               flushPending();
               if (pendingInitialInput && pendingInitialInput.trim()) {
-                queueOrSend({ type: 'input', data: pendingInitialInput, appendNewline: true });
+                // まずプロンプトを送信（改行なし）
+                queueOrSend({ type: 'input', data: pendingInitialInput, appendNewline: false });
                 pendingInitialInput = '';
                 flushPending();
+                
+                // 2秒後から開始し、1秒間隔で2回だけ、エンターと空白を送信
+                let attemptCount = 0;
+                const maxAttempts = 2;
+                
+                // 2秒待ってから開始
+                setTimeout(() => {
+                  const sendEnterLoop = setInterval(() => {
+                    if (!isReady || !sessionId) {
+                      clearInterval(sendEnterLoop);
+                      return;
+                    }
+                    
+                    attemptCount++;
+                    console.log(`[Terminal] Attempt ${attemptCount}/2: Sending enter/newline...`);
+                    
+                    // 様々な方法で改行を送信
+                    queueOrSend({ type: 'input', data: '', appendNewline: true }); // 空文字列 + 改行
+                    queueOrSend({ type: 'input', data: '\n', appendNewline: false }); // LF
+                    queueOrSend({ type: 'input', data: '\r', appendNewline: false }); // CR
+                    queueOrSend({ type: 'input', data: ' ', appendNewline: false }); // スペース
+                    
+                    setStatus(`改行送信中... (${attemptCount}/${maxAttempts})`, 'info');
+                    
+                    if (attemptCount >= maxAttempts) {
+                      clearInterval(sendEnterLoop);
+                      setStatus('改行送信完了', 'success');
+                      console.log('[Terminal] Completed 2 attempts of sending enter/newline');
+                    }
+                  }, 1000); // 1秒間隔
+                }, 2000); // 2秒待ってから開始
               }
               if (pendingSendQueue.length) {
                 pendingSendQueue.forEach(value => {
@@ -2056,6 +2145,8 @@ async function initDocMenuTable() {
         async function open(command, options = {}) {
           ensureOverlay();
           overlay.classList.add('visible');
+          imeComposing = false;
+          imePendingEnter = false;
           currentCommand = command;
           pendingInitialInput = typeof options.initialInput === 'string' ? options.initialInput.trim() : '';
           pendingQueue = [];
@@ -2548,7 +2639,8 @@ async function initDocMenuTable() {
           createdAt: task.createdAt || null,
           updatedAt: task.updatedAt || null,
           model: typeof task.model === 'string' ? task.model : null,
-        provider: typeof task.provider === 'string' ? task.provider : null,
+          provider: typeof task.provider === 'string' ? task.provider : null,
+          manualDone: task.manualDone ? true : false,
           externalTerminal: task.externalTerminal && task.externalTerminal.sessionId
             ? {
                 sessionId: String(task.externalTerminal.sessionId),
@@ -2557,6 +2649,8 @@ async function initDocMenuTable() {
                 appleSessionId: task.externalTerminal.appleSessionId || null
               }
             : null,
+          completionSummaryPending: task.completionSummaryPending ? true : false,
+          completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : '',
           logs
         };
       }
@@ -2576,6 +2670,7 @@ async function initDocMenuTable() {
           updatedAt: record.updatedAt || null,
           model: record.model || null,
           provider: record.provider || null,
+          manualDone: !!record.manualDone,
           externalTerminal: record.externalTerminal && record.externalTerminal.sessionId
             ? {
                 sessionId: String(record.externalTerminal.sessionId),
@@ -2584,6 +2679,8 @@ async function initDocMenuTable() {
                 appleSessionId: record.externalTerminal.appleSessionId || null
               }
             : null,
+          completionSummaryPending: !!record.completionSummaryPending,
+          completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
           logs: Array.isArray(record.logs)
             ? record.logs.map(log => {
                 const text = String(log);
@@ -2998,6 +3095,9 @@ async function initDocMenuTable() {
         body: JSON.stringify(payload)
       });
       if (!res.ok) {
+        if (res.status === 404) {
+          return;
+        }
         let detail = '';
         try {
           const data = await res.json();
@@ -3015,13 +3115,13 @@ async function initDocMenuTable() {
       return data;
     }
 
-    async function focusCodexTerminalSession(sessionId){
+    async function focusCodexTerminalSession(sessionId, appleSessionId){
       if (!sessionId) return;
       const base = await probeBackendBase();
       const res = await fetch(`${base.replace(/\/$/, '')}/api/terminal/codex`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'focus', sessionId })
+        body: JSON.stringify(appleSessionId ? { action: 'focus', sessionId, appleSessionId } : { action: 'focus', sessionId })
       });
       if (!res.ok) {
         let detail = '';
@@ -3039,9 +3139,53 @@ async function initDocMenuTable() {
     async function focusExternalTerminalTask(task) {
       if (!task || !task.externalTerminal || !task.externalTerminal.sessionId) return;
       try {
-        await focusCodexTerminalSession(task.externalTerminal.sessionId);
+        await focusCodexTerminalSession(task.externalTerminal.sessionId, task.externalTerminal.appleSessionId || null);
       } catch (err) {
         console.error('Failed to focus terminal session', err);
+      }
+    }
+
+    async function requestCompletionSummary(task) {
+      const base = await probeBackendBase();
+      const payload = {
+        action: 'summary',
+        taskPrompt: task && typeof task.prompt === 'string' ? task.prompt : '',
+        basePrompt: '完了済みにする際に自動でterminalにこれまでの作業をまとめて、特に編集、生成したファイルパスを必ず記述すること'
+      };
+      if (task && task.externalTerminal && task.externalTerminal.sessionId) {
+        payload.sessionId = task.externalTerminal.sessionId;
+        if (task.externalTerminal.appleSessionId) {
+          payload.appleSessionId = task.externalTerminal.appleSessionId;
+        }
+      }
+      const res = await fetch(`${base.replace(/\/$/, '')}/api/terminal/codex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const data = await res.json();
+          detail = data && (data.message || data.error) ? (data.message || data.error) : '';
+        } catch (_) {
+          detail = await res.text().catch(() => '') || '';
+        }
+        const message = detail ? `${res.status} ${detail}` : `HTTP ${res.status}`;
+        throw new Error(message);
+      }
+      return res.json();
+    }
+
+    async function generateCompletionSummaryForTask(task) {
+      try {
+        return await requestCompletionSummary(task);
+      } catch (err) {
+        console.error('Completion summary generation failed', err);
+        const message = err && err.message ? err.message : String(err || 'unknown_error');
+        return {
+          summary: `完了要約の生成に失敗しました: ${message}`
+        };
       }
     }
 
@@ -3536,7 +3680,26 @@ async function initDocMenuTable() {
       }
       const id = String(task.id);
       const idx = state.tasks.findIndex(x => String(x.id) === id);
-      if (idx >= 0) state.tasks[idx] = task; else state.tasks.unshift(task);
+      if (idx >= 0) {
+        const existing = state.tasks[idx];
+        const preservedManual = existing && typeof existing.manualDone === 'boolean' ? existing.manualDone : false;
+        const incomingManual = typeof task.manualDone === 'boolean' ? task.manualDone : undefined;
+        state.tasks[idx] = { ...existing, ...task };
+        if (incomingManual === undefined) {
+          state.tasks[idx].manualDone = preservedManual;
+        }
+        if (typeof task.completionSummary !== 'string') {
+          state.tasks[idx].completionSummary = typeof existing.completionSummary === 'string' ? existing.completionSummary : '';
+        }
+      } else {
+        if (typeof task.manualDone !== 'boolean') {
+          task.manualDone = false;
+        }
+        if (typeof task.completionSummary !== 'string') {
+          task.completionSummary = '';
+        }
+        state.tasks.unshift(task);
+      }
       state.tasks.sort((a,b)=>new Date(b.createdAt||0) - new Date(a.createdAt||0));
       cleanupTasksAndLogs();
       schedulePersist();
@@ -3589,6 +3752,8 @@ async function initDocMenuTable() {
               command: result && result.command ? String(result.command) : 'codex',
               appleSessionId: result && result.appleSessionId ? String(result.appleSessionId) : null
             },
+            manualDone: false,
+            completionSummary: '',
             logs: []
           };
           mergeTask(task);
@@ -3608,6 +3773,8 @@ async function initDocMenuTable() {
             error: `Codexターミナルの起動に失敗: ${message}`,
             model: selectedModel ? selectedModel.id : null,
             provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
+            manualDone: false,
+            completionSummary: '',
             logs: []
           };
           mergeTask(task);
@@ -3637,7 +3804,9 @@ async function initDocMenuTable() {
         result: null,
         error: null,
         model: modelId,
-        provider: selectedModel && selectedModel.provider ? selectedModel.provider : null
+        provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
+        manualDone: false,
+        completionSummary: ''
       };
       mergeTask(task);
       render();
@@ -3735,19 +3904,22 @@ async function initDocMenuTable() {
         : state.tasks.slice());
 
       const cardsHtml = tasksToRender.map(t => {
-        const isExternal = !!(t && t.externalTerminal && t.externalTerminal.sessionId);
+        const manualDone = !!(t && t.manualDone);
+        const activeTerminal = (!manualDone && t && t.externalTerminal && t.externalTerminal.sessionId) ? t.externalTerminal : null;
+        const isExternal = !!activeTerminal;
         const s = t && typeof t.status === 'string' && t.status ? t.status : (isExternal ? 'external' : 'running');
         const cls = cssStatus(s);
-        const icon = iconFor(s);
+        const icon = manualDone ? '✅' : iconFor(s);
         const title = escapeHtml(t.prompt || '');
         const responseText = String(t.response || '');
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
         const items = [];
+        const summaryPending = !!(t && t.completionSummaryPending);
 
-        if (isExternal && t.externalTerminal && t.externalTerminal.sessionId) {
-          const terminalLabel = t.externalTerminal.app ? String(t.externalTerminal.app) : 'ターミナル';
-          const sessionIdAttr = escapeHtml(String(t.externalTerminal.sessionId));
+        if (isExternal && activeTerminal && activeTerminal.sessionId) {
+          const terminalLabel = activeTerminal.app ? String(activeTerminal.app) : 'ターミナル';
+          const sessionIdAttr = escapeHtml(String(activeTerminal.sessionId));
           const terminalTitle = `${terminalLabel} を前面に表示`;
           const buttonLabel = `${terminalLabel}を開く`;
           items.push(`<span class="tb-meta-item" data-action="focus-terminal" data-session="${sessionIdAttr}" title="${escapeHtml(terminalTitle)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(148, 163, 184, 0.18);transition:background 0.2s;">
@@ -3770,6 +3942,36 @@ async function initDocMenuTable() {
         const modelBadge = chosenModel
           ? `<span class="tb-model-pill" data-model="${escapeHtml(chosenModel.id)}">@${escapeHtml(chosenModel.shortLabel || chosenModel.label || chosenModel.id)}</span>`
           : '';
+
+        const manualToggleLabel = summaryPending
+          ? '完了まとめを取得しています...'
+          : manualDone
+              ? '完了済み（クリックで未完了に戻す）'
+              : (isExternal
+                  ? '@Codex+terminalのセッションを終了して完了にします'
+                  : '手動で完了にします');
+        const manualToggleText = summaryPending
+          ? '要約取得中...'
+          : (manualDone ? '完了済み' : '未完了');
+        const manualToggleClasses = `tb-done-toggle${manualDone ? ' is-active' : ''}${summaryPending ? ' is-loading' : ''}`;
+        const manualToggleBusyAttrs = summaryPending ? ' aria-busy="true" disabled' : '';
+        const manualToggle = `<button type="button" class="${manualToggleClasses}" data-action="toggle-done" aria-pressed="${manualDone ? 'true' : 'false'}" title="${escapeHtml(manualToggleLabel)}"${manualToggleBusyAttrs}>${manualToggleText}</button>`;
+
+        let summarySection = '';
+        if (manualDone && t.completionSummary) {
+          summarySection = `<div class="tb-summary" data-role="completion-summary">
+                <div class="tb-summary-title">完了まとめ</div>
+                <pre class="tb-summary-body">${escapeHtml(t.completionSummary)}</pre>
+             </div>`;
+        } else if (summaryPending) {
+          summarySection = `<div class="tb-summary tb-summary--pending" data-role="completion-summary">
+                <div class="tb-summary-title">完了まとめ</div>
+                <div class="tb-summary-body tb-summary-body--pending" role="status" aria-live="polite">
+                  <span class="tb-summary-spinner" aria-hidden="true"></span>
+                  <span>完了まとめを取得中です...</span>
+                </div>
+             </div>`;
+        }
 
         // URL検出
         for (const match of urlMatches) {
@@ -3820,7 +4022,7 @@ async function initDocMenuTable() {
         // 経過時間に応じてステータステキストを変更
         let statusText = '';
         if (isExternal) {
-          const terminalLabel = t.externalTerminal && t.externalTerminal.app ? t.externalTerminal.app : 'ターミナル';
+          const terminalLabel = activeTerminal && activeTerminal.app ? activeTerminal.app : 'ターミナル';
           statusText = `${terminalLabel} で操作中`;
         } else if (showProgress) {
           if (elapsed < 60000) {
@@ -3834,28 +4036,33 @@ async function initDocMenuTable() {
           statusText = t.error ? String(t.error) : s;
         }
 
+        if (manualDone) {
+          statusText = '手動で完了済み';
+        }
+
         const serverIdAttr = t.serverId ? escapeHtml(String(t.serverId)) : '';
         const cacheKey = escapeHtml(String(t.serverId || t.id));
         return `
-          <div class="task-item ${cls}" data-id="${String(t.id)}" data-server-id="${serverIdAttr}" data-cache-key="${cacheKey}">
+          <div class="task-item ${cls}${manualDone ? ' manual-done' : ''}" data-id="${String(t.id)}" data-server-id="${serverIdAttr}" data-cache-key="${cacheKey}">
             <button class="task-status ${cls}" data-action="open" title="詳細を表示">
               <span class="i">${icon}</span>
             </button>
             <div class="task-text">
               <div class="task-title-row">
                 <span class="task-title-text">${title}</span>
-                ${modelBadge}
+                ${modelBadge}${manualToggle}
               </div>
               ${startedAt ? `<div class="tb-timestamp">開始: ${escapeHtml(startedAt)}${finishedAt ? ` / 更新: ${escapeHtml(finishedAt)}` : ''}</div>` : ''}
               <div class="tb-meta" style="font-size:.75rem;color:var(--text-weak);margin-top:3px;">
-                ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
-                ${items.join('')}
-              </div>
-              ${showProgress ? `
-                <div class="tb-progress" style="margin-top:6px;height:6px;border-radius:999px;background:rgba(255,255,255,0.1);overflow:hidden;position:relative;">
-                  <div class="tb-progress-bar" style="height:100%;width:${progressPct}%;background:linear-gradient(90deg,#4a9eff,#00d4ff);transition:width 0.5s ease;position:relative;overflow:hidden;">
-                    <div class="tb-progress-shine" style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent);animation:shine 1.5s infinite;"></div>
-                  </div>
+              ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
+              ${items.join('')}
+            </div>
+            ${summarySection}
+            ${showProgress ? `
+              <div class="tb-progress" style="margin-top:6px;height:6px;border-radius:999px;background:rgba(255,255,255,0.1);overflow:hidden;position:relative;">
+                <div class="tb-progress-bar" style="height:100%;width:${progressPct}%;background:linear-gradient(90deg,#4a9eff,#00d4ff);transition:width 0.5s ease;position:relative;overflow:hidden;">
+                  <div class="tb-progress-shine" style="position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent);animation:shine 1.5s infinite;"></div>
+                </div>
                 </div>
               ` : ''}
             </div>
@@ -4147,7 +4354,7 @@ async function initDocMenuTable() {
       const any = e.target.closest('.task-item');
       if (!any) return; const id = any.getAttribute('data-id');
       if (!id) return;
-      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"],[data-action="focus-terminal"]');
+      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"],[data-action="focus-terminal"],[data-action="toggle-done"]');
       try {
         const task = state.tasks.find(t => String(t.id) === String(id));
         if (!task) throw new Error('task not found');
@@ -4221,6 +4428,43 @@ async function initDocMenuTable() {
             if (sessionId) {
               await focusExternalTerminalTask(task);
             }
+            return;
+          }
+          if (action === 'toggle-done') {
+            e.preventDefault();
+            e.stopPropagation();
+            const nextState = !task.manualDone;
+            if (nextState) {
+              const shouldRequestSummary = !!(task && task.externalTerminal && task.externalTerminal.sessionId);
+              let summaryPayload = null;
+              if (shouldRequestSummary) {
+                task.completionSummaryPending = true;
+                render();
+                try {
+                  summaryPayload = await generateCompletionSummaryForTask(task);
+                } catch (err) {
+                  console.error('Completion summary request failed', err);
+                } finally {
+                  task.completionSummaryPending = false;
+                }
+              }
+              if (summaryPayload && typeof summaryPayload === 'object' && typeof summaryPayload.summary === 'string' && summaryPayload.summary.trim()) {
+                task.completionSummary = summaryPayload.summary.trim();
+              } else if (!task.completionSummary || !task.completionSummary.trim()) {
+                task.completionSummary = '完了としてマークしました。必要に応じて詳細を追記してください。';
+              }
+              task.manualDone = true;
+              if (task.status === 'external') {
+                task.status = 'completed';
+              }
+            } else {
+              task.manualDone = false;
+              task.completionSummaryPending = false;
+              task.completionSummary = '';
+            }
+            task.updatedAt = new Date().toISOString();
+            schedulePersist();
+            render();
             return;
           }
         }
