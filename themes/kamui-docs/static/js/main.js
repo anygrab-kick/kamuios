@@ -3638,6 +3638,8 @@ async function initDocMenuTable() {
       if (s === 'completed') return 'done';
       if (s === 'failed') return 'done';
       if (s === 'external') return 'doing';
+      if (s === 'codex-working') return 'working'; // Codex実行中用のステータス
+      if (s === 'codex-waiting') return 'waiting'; // Codex待機中用のステータス
       return 'todo';
     }
     function iconFor(s){
@@ -3645,6 +3647,8 @@ async function initDocMenuTable() {
       if (s === 'completed') return '✔';
       if (s === 'failed') return '×';
       if (s === 'external') return '🖥';
+      if (s === 'codex-working') return '🛠️'; // Codex実行中用のアイコン
+      if (s === 'codex-waiting') return '⏸️'; // Codex待機中用のアイコン
       return '';
     }
 
@@ -3754,7 +3758,8 @@ async function initDocMenuTable() {
             },
             manualDone: false,
             completionSummary: '',
-            logs: []
+            logs: [],
+            codexIsWorking: false // 初期状態はfalse
           };
           mergeTask(task);
           render();
@@ -3907,11 +3912,20 @@ async function initDocMenuTable() {
         const manualDone = !!(t && t.manualDone);
         const activeTerminal = (!manualDone && t && t.externalTerminal && t.externalTerminal.sessionId) ? t.externalTerminal : null;
         const isExternal = !!activeTerminal;
-        const s = t && typeof t.status === 'string' && t.status ? t.status : (isExternal ? 'external' : 'running');
+        const isCodex = activeTerminal && activeTerminal.command && activeTerminal.command.toLowerCase().includes('codex');
+        const responseText = String(t.response || '');
+        let s = t && typeof t.status === 'string' && t.status ? t.status : (isExternal ? 'external' : 'running');
+        
+        // Codexの場合のステータス判定を詳細化
+        if (isCodex && (s === 'external' || s === 'running')) {
+          // codexIsWorkingプロパティまたはレスポンステキストをチェック
+          const isActuallyWorking = t.codexIsWorking || (responseText && responseText.toLowerCase().includes('working'));
+          s = isActuallyWorking ? 'codex-working' : 'codex-waiting';
+        }
+        
         const cls = cssStatus(s);
         const icon = manualDone ? '✅' : iconFor(s);
         const title = escapeHtml(t.prompt || '');
-        const responseText = String(t.response || '');
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
         const items = [];
@@ -3952,7 +3966,13 @@ async function initDocMenuTable() {
                   : '手動で完了にします');
         const manualToggleText = summaryPending
           ? '要約取得中...'
-          : (manualDone ? '完了済み' : '未完了');
+          : manualDone 
+              ? '完了済み' 
+              : (s === 'codex-working')
+                  ? '仕事中'
+                  : (s === 'codex-waiting')
+                      ? '待機中'
+                      : '未完了';
         const manualToggleClasses = `tb-done-toggle${manualDone ? ' is-active' : ''}${summaryPending ? ' is-loading' : ''}`;
         const manualToggleBusyAttrs = summaryPending ? ' aria-busy="true" disabled' : '';
         const manualToggle = `<button type="button" class="${manualToggleClasses}" data-action="toggle-done" aria-pressed="${manualDone ? 'true' : 'false'}" title="${escapeHtml(manualToggleLabel)}"${manualToggleBusyAttrs}>${manualToggleText}</button>`;
@@ -4021,7 +4041,12 @@ async function initDocMenuTable() {
 
         // 経過時間に応じてステータステキストを変更
         let statusText = '';
-        if (isExternal) {
+        if (s === 'codex-working') {
+          statusText = '';  // 仕事中は上部ボタンに表示するのでここでは空
+        } else if (s === 'codex-waiting') {
+          statusText = '';  // 待機中も上部ボタンに表示するのでここでは空
+        } else if (isExternal && !isCodex) {
+          // Codex以外の外部ターミナルの場合のみ表示
           const terminalLabel = activeTerminal && activeTerminal.app ? activeTerminal.app : 'ターミナル';
           statusText = `${terminalLabel} で操作中`;
         } else if (showProgress) {
@@ -4449,7 +4474,13 @@ async function initDocMenuTable() {
                 }
               }
               if (summaryPayload && typeof summaryPayload === 'object' && typeof summaryPayload.summary === 'string' && summaryPayload.summary.trim()) {
-                task.completionSummary = summaryPayload.summary.trim();
+                // 改行や\n文字列を削除して1文にまとめる
+                const cleanedSummary = summaryPayload.summary.trim()
+                  .replace(/\\n/g, ' ')  // \n文字列を削除
+                  .replace(/\n/g, ' ')   // 改行を削除
+                  .replace(/\s+/g, ' ')  // 連続するスペースを1つに
+                  .trim();
+                task.completionSummary = cleanedSummary;
               } else if (!task.completionSummary || !task.completionSummary.trim()) {
                 task.completionSummary = '完了としてマークしました。必要に応じて詳細を追記してください。';
               }
@@ -4513,9 +4544,106 @@ async function initDocMenuTable() {
       console.log('MCP tools state:', state.mcpTools);
     }, 100);
     
+    // タスクの定期更新
     setInterval(() => {
-      if (state.tasks.some(t => t.status === 'running')) render();
+      const hasRunningOrExternal = state.tasks.some(t => t.status === 'running' || t.status === 'external');
+      if (hasRunningOrExternal) render();
     }, 500);
+    
+    // Codexターミナルセッションのステータスを定期的にチェック
+    async function updateCodexTaskStatuses() {
+      // macOSでのみ実行
+      if (navigator.platform && !navigator.platform.toLowerCase().includes('mac')) return;
+      
+      const codexTasks = state.tasks.filter(t => 
+        t.status === 'external' && 
+        t.externalTerminal && 
+        t.externalTerminal.command && 
+        t.externalTerminal.command.toLowerCase().includes('codex')
+      );
+      
+      if (codexTasks.length === 0) return;
+      
+      const backendBase = await probeBackendBase();
+      
+      for (const task of codexTasks) {
+        if (!task.externalTerminal || !task.externalTerminal.sessionId) continue;
+        
+        try {
+          const response = await fetch(`${backendBase}/api/terminal/codex/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: task.externalTerminal.sessionId,
+              appleSessionId: task.externalTerminal.appleSessionId || null
+            })
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            const wasWorking = task.codexIsWorking;
+            const isNowWorking = data.isWorking || false;
+            
+            // レスポンスを更新して、Working状態を反映
+            task.response = data.content || '';
+            task.codexIsWorking = isNowWorking;
+            
+            console.log(`[Codex Status] Session ${task.externalTerminal.sessionId}: Working=${isNowWorking} (was=${wasWorking})`);
+            
+            // WorkingからWorking以外に変わった場合、自動的に完了まとめを取得
+            // wasWorkingがtrueの場合のみ（初回チェック時はundefinedなので実行しない）
+            if (wasWorking === true && !isNowWorking && !task.manualDone && !task.completionSummaryPending) {
+              console.log(`[Codex Status] Working finished for ${task.externalTerminal.sessionId}, generating completion summary...`);
+              
+              // 完了まとめを自動生成
+              task.completionSummaryPending = true;
+              render();
+              
+              // 少し待ってから完了まとめを取得（出力が完全に終わるのを待つ）
+              setTimeout(async () => {
+                try {
+                  const summaryPayload = await generateCompletionSummaryForTask(task);
+                  if (summaryPayload && typeof summaryPayload === 'object' && typeof summaryPayload.summary === 'string' && summaryPayload.summary.trim()) {
+                    // 改行や\n文字列を削除して1文にまとめる
+                    const cleanedSummary = summaryPayload.summary.trim()
+                      .replace(/\\n/g, ' ')  // \n文字列を削除
+                      .replace(/\n/g, ' ')   // 改行を削除
+                      .replace(/\s+/g, ' ')  // 連続するスペースを1つに
+                      .trim();
+                    task.completionSummary = cleanedSummary;
+                    task.manualDone = true;
+                    console.log(`[Codex Status] Completion summary generated for ${task.externalTerminal.sessionId}`);
+                  } else {
+                    // まとめが取得できなかった場合のデフォルトメッセージ
+                    task.completionSummary = 'Codexでのタスクが完了しました。';
+                    task.manualDone = true;
+                  }
+                } catch (err) {
+                  console.error('[Codex Status] Failed to generate completion summary:', err);
+                  // エラーの場合もデフォルトメッセージで完了
+                  task.completionSummary = 'Codexでのタスクが完了しました。';
+                  task.manualDone = true;
+                } finally {
+                  task.completionSummaryPending = false;
+                  render();
+                }
+              }, 2000); // 2秒待機
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to update Codex task status:', err);
+        }
+      }
+      
+      // 変更があった場合は再レンダリング
+      render();
+    }
+    
+    // 3秒ごとにCodexタスクの状態をチェック
+    setInterval(updateCodexTaskStatuses, 3000);
+    
+    // 初回は即座に実行
+    setTimeout(updateCodexTaskStatuses, 100);
   } catch(err) {
     console.error('TaskBoard init failed', err);
   }

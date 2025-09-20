@@ -671,6 +671,12 @@ pre.code code { color: var(--text); }
 .task-item.doing .tb-timestamp {
   color: color-mix(in srgb, #fb923c 55%, var(--text) 45%);
 }
+.task-item.working .tb-timestamp {
+  color: color-mix(in srgb, #f97316 60%, var(--text) 40%);
+}
+.task-item.waiting .tb-timestamp {
+  color: color-mix(in srgb, #6b7280 50%, var(--text) 50%);
+}
 
 /* --- PTYターミナルオーバーレイ --- */
 .pty-terminal-overlay {
@@ -971,6 +977,14 @@ pre.code code { color: var(--text); }
 .task-item.done { border-color: color-mix(in srgb, #22c55e 40%, var(--border) 60%); background: color-mix(in srgb, #22c55e 12%, var(--card) 88%); }
 .task-item.done .task-status { border-color: #22c55e; background: color-mix(in srgb, #22c55e 18%, var(--input-bg) 82%); }
 .task-item.done .task-status .i { color: #22c55e; }
+
+.task-item.working { border-color: color-mix(in srgb, #f97316 50%, var(--border) 50%); background: color-mix(in srgb, #f97316 15%, var(--card) 85%); }
+.task-item.working .task-status { border-color: #f97316; background: color-mix(in srgb, #f97316 22%, var(--input-bg) 78%); }
+.task-item.working .task-status .i { color: #f97316; }
+
+.task-item.waiting { border-color: color-mix(in srgb, #6b7280 40%, var(--border) 60%); background: color-mix(in srgb, #6b7280 10%, var(--card) 90%); }
+.task-item.waiting .task-status { border-color: #6b7280; background: color-mix(in srgb, #6b7280 15%, var(--input-bg) 85%); }
+.task-item.waiting .task-status .i { color: #6b7280; }
 .task-item.manual-done { border-color: color-mix(in srgb, #10b981 45%, var(--border) 55%); background: color-mix(in srgb, #10b981 14%, var(--card) 86%); }
 .task-item.manual-done .task-status { border-color: #10b981; background: color-mix(in srgb, #10b981 20%, var(--input-bg) 80%); }
 .task-item.manual-done .task-status .i { color: #10b981; }
@@ -1449,7 +1463,8 @@ pre.code code { color: var(--text); }
 }
 
 /* 実行中のアイコンアニメーション */
-.task-item.doing .task-status .i {
+.task-item.doing .task-status .i,
+.task-item.working .task-status .i {
   animation: pulse 1.5s ease-in-out infinite;
 }
 

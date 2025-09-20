@@ -194,7 +194,10 @@ function cleanTerminalSummary(raw, promptText) {
         if (/^(OK|Done|Complete|Finished|Success|Failed|Error:|Warning:)/i.test(trimmed) && trimmed.length <= 20) continue;
         filtered.push(trimEnd);
     }
-    let result = filtered.join('\n').trim();
+    // 複数行を1文にまとめる
+    let result = filtered.join(' ').replace(/\s+/g, ' ').trim();
+    // \n文字列として表示されているものを削除
+    result = result.replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim();
     if (!hasMeaningfulText(result)) {
         const fallback = lines
             .map(line => line.replace(/^\s*>+\s?/, '').trim())
@@ -204,8 +207,11 @@ function cleanTerminalSummary(raw, promptText) {
             .filter(line => !/^'+$/.test(line))
             .filter(line => !(/^(send|⌫|↵|⇧|token|Esc\b|Prompt:|stdout:|stderr:|Stdout:|Stderr:|>>?>|~)/i.test(line)))
             .filter(line => !( /transcript|newline|token usage|Ctrl\+|^\^/i.test(line) && line.length <= 60));
-        const fallbackText = fallback.join('\n').trim();
-        result = hasMeaningfulText(fallbackText) ? fallbackText : '';
+        // fallbackも1文にまとめる
+        const fallbackText = fallback.join(' ').replace(/\s+/g, ' ').trim();
+        // \n文字列として表示されているものを削除
+        const cleanedFallback = fallbackText.replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim();
+        result = hasMeaningfulText(cleanedFallback) ? cleanedFallback : '';
     }
     return result;
 }
@@ -1670,6 +1676,62 @@ const server = http.createServer((req, res) => {
                 console.error('[PTY] Failed to open iTerm:', err.message);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'failed_to_open_iterm', message: err.message }));
+            }
+        });
+    } else if (requestUrl.pathname === '/api/terminal/codex/status' && req.method === 'POST') {
+        // Codexターミナルセッションのステータスを取得
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', async () => {
+            let payload = {};
+            if (body) {
+                try {
+                    payload = JSON.parse(body);
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'invalid_json', message: err.message }));
+                    return;
+                }
+            }
+            
+            const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+            const appleSessionId = payload && typeof payload.appleSessionId === 'string' ? payload.appleSessionId.trim() : null;
+            
+            if (!sessionId) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'missing_session_id' }));
+                return;
+            }
+            
+            if (process.platform !== 'darwin') {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'unsupported_platform' }));
+                return;
+            }
+            
+            try {
+                const content = await getItermSessionContent(sessionId, appleSessionId);
+                const isWorking = content && content.toLowerCase().includes('working');
+                console.log(`[Codex Status Check] Session ${sessionId}: Working=${isWorking}, Content length=${content ? content.length : 0}`);
+                if (isWorking && content) {
+                    // Workingが見つかった場合、その部分を抽出してログに表示
+                    const workingIndex = content.toLowerCase().indexOf('working');
+                    const excerpt = content.slice(Math.max(0, workingIndex - 50), Math.min(content.length, workingIndex + 50));
+                    console.log(`[Codex Status Check] Working excerpt: ${excerpt}`);
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                    success: true, 
+                    sessionId,
+                    isWorking,
+                    content: content ? content.slice(-2000) : '' // 最後の2000文字だけ返す
+                }));
+            } catch (err) {
+                const message = err && err.message ? err.message : String(err || 'failed');
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'get_content_failed', message }));
             }
         });
     } else if (requestUrl.pathname === '/api/terminal/codex' && req.method === 'POST') {
