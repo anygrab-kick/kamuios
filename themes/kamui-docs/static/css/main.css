@@ -1906,17 +1906,17 @@ pre.code code { color: var(--text); }
   height: 100%;
 }
 [data-theme="light"] .tb-priority-select-wrap {
-  background: color-mix(in srgb, var(--input-bg) 90%, transparent);
-  border-color: color-mix(in srgb, rgba(148,163,184,0.55) 60%, rgba(203,213,225,0.7) 40%);
-  color: color-mix(in srgb, #1f2937 80%, rgba(30,64,175,0.4) 20%);
+  background: color-mix(in srgb, var(--input-bg) 95%, transparent);
+  border-color: color-mix(in srgb, rgba(148,163,184,0.45) 50%, rgba(203,213,225,0.8) 50%);
+  color: #1f2937;
 }
 [data-theme="light"] .tb-priority-select-wrap:focus-within {
-  color: color-mix(in srgb, #1f2937 92%, #2563eb 8%);
-  border-color: color-mix(in srgb, #2563eb 55%, rgba(148,163,184,0.45) 45%);
-  box-shadow: 0 0 0 2px color-mix(in srgb, #2563eb 22%, transparent);
+  color: #1e3a8a;
+  border-color: color-mix(in srgb, #2563eb 65%, rgba(148,163,184,0.45) 35%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, #2563eb 20%, transparent);
 }
 [data-theme="light"] .tb-priority-select-wrap::after {
-  opacity: 0.7;
+  opacity: 0.8;
 }
 .tb-priority-controls,
 .tb-priority-field { display: none; }
