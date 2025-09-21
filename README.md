@@ -470,4 +470,3 @@ hugo server -D -p 1313
    ```
 
 **注**: Python SDKサーバーのファイル（`backend/claude_sdk_server.py`）は削除しても構いませんが、必要に応じてバックアップしておくことをお勧めします。
-# Test direct push
