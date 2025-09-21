@@ -627,6 +627,47 @@ pre.code code { color: var(--text); }
   border-bottom-color: rgba(0,0,0,0.08);
 }
 .tb-title { font-weight: 800; color: var(--text); font-size: 0.95rem; }
+.tb-sync-status {
+  font-size: 0.75rem;
+  line-height: 1.3;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(59,130,246,0.16);
+  border: 1px solid rgba(59,130,246,0.28);
+  color: color-mix(in srgb, #bfdbfe 65%, var(--text) 35%);
+  letter-spacing: 0.02em;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+  white-space: nowrap;
+}
+.tb-sync-status.info { background: rgba(59,130,246,0.16); border-color: rgba(59,130,246,0.28); }
+.tb-sync-status.success {
+  background: rgba(34,197,94,0.18);
+  border-color: rgba(34,197,94,0.32);
+  color: color-mix(in srgb, #bbf7d0 70%, var(--text) 30%);
+}
+.tb-sync-status.error {
+  background: rgba(248,113,113,0.20);
+  border-color: rgba(248,113,113,0.34);
+  color: color-mix(in srgb, #fecaca 75%, var(--text) 25%);
+}
+[data-theme="light"] .tb-sync-status {
+  background: rgba(37,99,235,0.12);
+  border-color: rgba(37,99,235,0.22);
+  color: color-mix(in srgb, #1d4ed8 65%, #111827 35%);
+}
+[data-theme="light"] .tb-sync-status.success {
+  background: rgba(22,163,74,0.12);
+  border-color: rgba(22,163,74,0.24);
+  color: color-mix(in srgb, #047857 70%, #0f172a 30%);
+}
+[data-theme="light"] .tb-sync-status.error {
+  background: rgba(220,38,38,0.12);
+  border-color: rgba(220,38,38,0.26);
+  color: color-mix(in srgb, #b91c1c 70%, #0f172a 30%);
+}
+.tb-sync-status[aria-hidden="true"], .tb-sync-status:empty {
+  display: none;
+}
 .tb-actions { margin-left: auto; display: flex; gap: 6px; }
 .tb-btn { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 8px; cursor: pointer; }
 .tb-hide { border-color: rgba(255,255,255,0.12); }
@@ -1048,6 +1089,62 @@ pre.code code { color: var(--text); }
   border: 2px solid rgba(56, 189, 248, 0.45);
   border-top-color: rgba(56, 189, 248, 0.95);
   animation: tb-spin 0.9s linear infinite;
+}
+
+.taskboard-context-menu {
+  position: fixed;
+  min-width: 216px;
+  padding: 6px 0;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, rgba(148, 163, 184, 0.45));
+  background: color-mix(in srgb, var(--card) 92%, rgba(15, 23, 42, 0.92));
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.38);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 65000;
+  backdrop-filter: blur(14px);
+}
+.taskboard-context-menu.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.taskboard-context-menu .tb-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.taskboard-context-menu .tb-context-item:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.16);
+}
+.taskboard-context-menu .tb-context-item:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.6);
+  outline-offset: -2px;
+}
+.taskboard-context-menu .tb-context-item.is-disabled,
+.taskboard-context-menu .tb-context-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+[data-theme="light"] .taskboard-context-menu {
+  background: color-mix(in srgb, var(--card) 96%, rgba(255, 255, 255, 0.95));
+  border-color: color-mix(in srgb, var(--border) 75%, rgba(148, 163, 184, 0.35));
+  box-shadow: 0 18px 32px rgba(15, 23, 42, 0.16);
+}
+[data-theme="light"] .taskboard-context-menu .tb-context-item:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.18);
 }
 
 .tb-done-toggle.is-loading {

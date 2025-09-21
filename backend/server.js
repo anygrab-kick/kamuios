@@ -155,6 +155,178 @@ if (DEFAULT_CLAUDE_MCP_CONFIG && fs.existsSync(DEFAULT_CLAUDE_MCP_CONFIG)) {
 const tasks = {};
 let nextTaskId = 1;
 
+// タスク永続化設定
+const TASKS_STATE_FILE = path.join(__dirname, 'tasks-state.json');
+const TASKS_STATE_VERSION = 1;
+const TASKS_PERSIST_DEBOUNCE_MS = 1200;
+let tasksPersistTimer = null;
+let tasksPersistDirty = false;
+let lastTasksPersistAt = null;
+
+function serializeTaskForPersist(task) {
+    if (!task || typeof task !== 'object') return null;
+    const base = {
+        id: task.id,
+        status: task.status,
+        prompt: task.prompt,
+        command: task.command,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+        endedAt: task.endedAt,
+        exitCode: task.exitCode,
+        urls: Array.isArray(task.urls) ? task.urls : [],
+        files: Array.isArray(task.files) ? task.files : [],
+        lastActivityAt: task.lastActivityAt,
+        durationMs: task.durationMs,
+        provider: task.provider || null,
+        model: task.model || null,
+        type: task.type || null,
+        resultText: task.resultText || '',
+        resultMeta: task.resultMeta || null,
+        logs: Array.isArray(task.logs) ? task.logs.slice(-200) : [],
+        stdout: typeof task.stdout === 'string' ? task.stdout : '',
+        stderr: typeof task.stderr === 'string' ? task.stderr : '',
+        stdoutBytes: task.stdoutBytes || 0,
+        stderrBytes: task.stderrBytes || 0,
+        manualDone: !!task.manualDone,
+        completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : '',
+        completionSummaryPending: !!task.completionSummaryPending,
+        codexPollingDisabled: !!task.codexPollingDisabled,
+        codexIdleChecks: Number.isFinite(task.codexIdleChecks) ? task.codexIdleChecks : 0,
+        codexHasSeenWorking: !!task.codexHasSeenWorking,
+        externalTerminal: task.externalTerminal && typeof task.externalTerminal === 'object' ? task.externalTerminal : null
+    };
+    return base;
+}
+
+function writeTasksSnapshot() {
+    try {
+        const snapshot = Object.values(tasks)
+            .map(serializeTaskForPersist)
+            .filter(Boolean);
+        const savedAt = new Date().toISOString();
+        const payload = {
+            version: TASKS_STATE_VERSION,
+            savedAt,
+            nextTaskId,
+            tasks: snapshot
+        };
+        fs.writeFileSync(TASKS_STATE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+        tasksPersistDirty = false;
+        lastTasksPersistAt = savedAt;
+    } catch (err) {
+        console.error('[Tasks] Failed to persist snapshot:', err.message);
+    }
+}
+
+function persistTasksImmediate(reason = 'immediate') {
+    if (tasksPersistTimer) {
+        clearTimeout(tasksPersistTimer);
+        tasksPersistTimer = null;
+    }
+    tasksPersistDirty = true;
+    writeTasksSnapshot();
+}
+
+function scheduleTasksPersist(reason = 'schedule') {
+    tasksPersistDirty = true;
+    if (tasksPersistTimer) return;
+    tasksPersistTimer = setTimeout(() => {
+        tasksPersistTimer = null;
+        if (!tasksPersistDirty) return;
+        writeTasksSnapshot();
+    }, TASKS_PERSIST_DEBOUNCE_MS);
+}
+
+function rehydrateTaskFromPersisted(record) {
+    if (!record || record.id == null) return null;
+    const id = String(record.id);
+    const createdAt = record.createdAt || new Date().toISOString();
+    const updatedAt = record.updatedAt || createdAt;
+    const restored = {
+        id,
+        status: typeof record.status === 'string' && record.status ? record.status : 'completed',
+        prompt: record.prompt || '',
+        command: record.command || '',
+        pid: null,
+        proc: null,
+        createdAt,
+        updatedAt,
+        endedAt: record.endedAt || null,
+        exitCode: record.exitCode != null ? record.exitCode : null,
+        logs: Array.isArray(record.logs) ? record.logs.map(String) : [],
+        urls: Array.isArray(record.urls) ? record.urls.map(String) : [],
+        files: Array.isArray(record.files) ? record.files.map(String) : [],
+        monitor: null,
+        stdout: typeof record.stdout === 'string' ? record.stdout : '',
+        stderr: typeof record.stderr === 'string' ? record.stderr : '',
+        resultMeta: record.resultMeta && typeof record.resultMeta === 'object' ? record.resultMeta : null,
+        lastActivityAt: record.lastActivityAt || updatedAt,
+        durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
+        heartbeatIntervalId: null,
+        resultText: record.resultText || '',
+        stdoutBytes: Number.isFinite(record.stdoutBytes) ? record.stdoutBytes : Buffer.byteLength((record.stdout || ''), 'utf8'),
+        stderrBytes: Number.isFinite(record.stderrBytes) ? record.stderrBytes : Buffer.byteLength((record.stderr || ''), 'utf8'),
+        provider: record.provider || null,
+        model: record.model || null,
+        type: record.type || null,
+        manualDone: !!record.manualDone,
+        completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
+        completionSummaryPending: !!record.completionSummaryPending,
+        codexPollingDisabled: !!record.codexPollingDisabled,
+        codexIdleChecks: Number.isFinite(record.codexIdleChecks) ? record.codexIdleChecks : 0,
+        codexHasSeenWorking: !!record.codexHasSeenWorking,
+        externalTerminal: record.externalTerminal && typeof record.externalTerminal === 'object' ? record.externalTerminal : null
+    };
+    if (restored.status === 'running') {
+        restored.status = 'failed';
+        const message = 'サーバー再起動によりタスクが中断されました。';
+        restored.resultText = restored.resultText ? `${restored.resultText}\n${message}` : message;
+        restored.exitCode = restored.exitCode != null ? restored.exitCode : -1;
+        restored.endedAt = restored.endedAt || new Date().toISOString();
+        restored.updatedAt = restored.endedAt;
+    }
+    return restored;
+}
+
+function loadPersistedTasks() {
+    if (!fs.existsSync(TASKS_STATE_FILE)) return;
+    try {
+        const raw = fs.readFileSync(TASKS_STATE_FILE, 'utf8');
+        if (!raw.trim()) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        const list = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+        let restoredCount = 0;
+        list.forEach((record) => {
+            const restored = rehydrateTaskFromPersisted(record);
+            if (!restored) return;
+            tasks[restored.id] = restored;
+            restoredCount += 1;
+        });
+        if (restoredCount) {
+            console.log(`[Tasks] Restored ${restoredCount} task(s) from local snapshot`);
+        }
+        if (parsed && parsed.nextTaskId && Number.isFinite(Number(parsed.nextTaskId))) {
+            nextTaskId = Math.max(nextTaskId, Number(parsed.nextTaskId));
+        } else {
+            const numericIds = Object.keys(tasks)
+                .map((key) => Number(key))
+                .filter((value) => Number.isFinite(value));
+            if (numericIds.length) {
+                nextTaskId = Math.max(nextTaskId, Math.max(...numericIds) + 1);
+            }
+        }
+        if (parsed && parsed.savedAt) {
+            lastTasksPersistAt = parsed.savedAt;
+        }
+    } catch (err) {
+        console.error('[Tasks] Failed to load persisted snapshot:', err.message);
+    }
+}
+
+loadPersistedTasks();
+
 // サーバーログ（リングバッファ + 任意でファイルにも保存）
 const serverLogs = [];
 const SERVER_LOG_LIMIT = 1000;
@@ -234,7 +406,7 @@ function summarizePromptForTab(prompt, maxLength = 48) {
     return `${normalized.slice(0, maxLength - 3)}...`;
 }
 
-const CODEX_JAPANESE_INSTRUCTION = '日本語で対応すること。';
+const CODEX_JAPANESE_INSTRUCTION = '日本語で対応すること。画像生成、動画生成、音声生成などクリエイティブ系タスクはcurlなどでダウンロードを必ずするように。';
 function writeLogLine(line) {
     try { fs.appendFileSync(LOG_FILE_PATH, line + '\n'); } catch (_) {}
 }
@@ -275,6 +447,7 @@ function appendAndParseOutput(task, chunk) {
         const filePath = p[0];
         if (!task.files.includes(filePath)) task.files.push(filePath);
     }
+    scheduleTasksPersist('output');
 }
 
 function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
@@ -373,6 +546,7 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         type: 'claude_cli'
     };
     tasks[id] = task;
+    scheduleTasksPersist('task_created');
     console.log(`[TASK ${id}] Child PID: ${child.pid}`);
     const mcpExists = resolvedMcp && fs.existsSync(resolvedMcp);
     console.log(`[TASK ${id}] MCP config path=${resolvedMcp} (exists=${mcpExists})`);
@@ -464,6 +638,7 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
                 console.log(`[TASK ${id}] Result JSON parse error: ${err.message}`);
             }
         }
+        persistTasksImmediate('task_closed');
     });
 
     child.on('error', (err) => {
@@ -477,6 +652,7 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
             clearInterval(task.heartbeatIntervalId);
             task.heartbeatIntervalId = null;
         }
+        persistTasksImmediate('task_error');
     });
     
     return task;
@@ -884,6 +1060,7 @@ function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides,
     };
 
     tasks[id] = task;
+    scheduleTasksPersist('codex_created');
 
     const codexContext = {
         buffer: '',
@@ -1075,6 +1252,7 @@ function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides,
             codexContext.errors.push(err.message);
             rejectCompletion(err);
         }
+        persistTasksImmediate('codex_closed');
     });
 
     child.on('error', (err) => {
@@ -1085,6 +1263,7 @@ function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides,
         task.endedAt = new Date().toISOString();
         task.updatedAt = task.endedAt;
         rejectCompletion(err);
+        persistTasksImmediate('codex_error');
     });
 
     return task;
@@ -1140,6 +1319,44 @@ function startMonitor(task, { intervalSec = 10, callbackUrl } = {}) {
     return task;
 }
 
+function composeTaskCopyBundle(task) {
+    if (!task) return null;
+    const prompt = typeof task.prompt === 'string' ? task.prompt.trim() : '';
+    const responseSource = typeof task.resultText === 'string' && task.resultText.trim()
+        ? task.resultText
+        : (typeof task.stdout === 'string' ? task.stdout.trim() : '');
+    const response = responseSource.trim();
+    const summary = typeof task.completionSummary === 'string' ? task.completionSummary.trim() : '';
+    const metaLines = [];
+    if (task.id != null) metaLines.push(`タスクID: ${task.id}`);
+    if (task.status) metaLines.push(`ステータス: ${task.status}`);
+    if (task.model || task.provider) {
+        const providerLabel = task.provider ? ` / ${task.provider}` : '';
+        metaLines.push(`モデル: ${(task.model || '(不明)')}${providerLabel}`);
+    }
+    if (task.createdAt) metaLines.push(`開始: ${task.createdAt}`);
+    if (task.updatedAt) metaLines.push(`更新: ${task.updatedAt}`);
+    if (task.exitCode != null) metaLines.push(`終了コード: ${task.exitCode}`);
+    if (task.externalTerminal && task.externalTerminal.command) {
+        metaLines.push(`外部コマンド: ${task.externalTerminal.command}`);
+    }
+    const sections = [];
+    if (prompt) sections.push(`【プロンプト】\n${prompt}`);
+    if (response) sections.push(`【AIレスポンス】\n${response}`);
+    if (summary) sections.push(`【完了まとめ】\n${summary}`);
+    const parts = [];
+    if (metaLines.length) parts.push(metaLines.join('\n'));
+    if (sections.length) parts.push(sections.join('\n\n'));
+    const full = parts.join('\n\n').trim();
+    return {
+        prompt,
+        response,
+        summary,
+        meta: metaLines,
+        full
+    };
+}
+
 function publicTaskView(task, includeLogs = false) {
     if (!task) return null;
     const joinedLogs = (task.logs || []).join('\n');
@@ -1152,6 +1369,7 @@ function publicTaskView(task, includeLogs = false) {
     const stdout = includeLogs ? takeTail(task.stdout || '') : undefined;
     const stderr = includeLogs ? takeTail(task.stderr || '') : undefined;
     const promptPreview = createPromptPreview(task.prompt || '', 12);
+    const copyBundle = composeTaskCopyBundle(task);
     return {
         id: task.id,
         status: task.status,
@@ -1175,6 +1393,7 @@ function publicTaskView(task, includeLogs = false) {
         manualDone: task.manualDone ? true : false,
         completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : undefined,
         completionSummaryPending: task.completionSummaryPending ? true : false,
+        copyBundle,
         resultMeta: includeLogs ? task.resultMeta : undefined,
         monitor: task.monitor ? {
             intervalSec: task.monitor.intervalSec,
@@ -2094,7 +2313,7 @@ const server = http.createServer((req, res) => {
                 return;
             }
             res.writeHead(200);
-            res.end(JSON.stringify({ task: publicTaskView(task, false) }));
+            res.end(JSON.stringify({ task: publicTaskView(task, false), persistedAt: lastTasksPersistAt }));
         } else {
             const list = Object.values(tasks).map(t => publicTaskView(t, false));
             // サマリー統計
@@ -2104,7 +2323,7 @@ const server = http.createServer((req, res) => {
                 return acc;
             }, { total: 0, running: 0, completed: 0, failed: 0 });
             res.writeHead(200);
-            res.end(JSON.stringify({ tasks: list, stats }));
+            res.end(JSON.stringify({ tasks: list, stats, persistedAt: lastTasksPersistAt }));
         }
     } else if (requestUrl.pathname === '/api/agent/result' && req.method === 'GET') {
         // タスク結果詳細（ログ含む）
@@ -2122,7 +2341,7 @@ const server = http.createServer((req, res) => {
             return;
         }
         res.writeHead(200);
-        res.end(JSON.stringify({ task: publicTaskView(task, includeLogs) }));
+        res.end(JSON.stringify({ task: publicTaskView(task, includeLogs), persistedAt: lastTasksPersistAt }));
     } else if (requestUrl.pathname === '/api/claude/chat' && req.method === 'POST') {
         // Claude headlessモードエンドポイント（Python SDKサーバーの代替）
         let body = '';
@@ -2163,6 +2382,7 @@ const server = http.createServer((req, res) => {
                     type: 'claude_chat'
                 };
                 tasks[chatTaskId] = taskRecord;
+                scheduleTasksPersist('claude_chat_created');
 
                 // Claude CLIをheadlessモードで実行（stream-jsonフォーマットを使用）
                 // システムプロンプトを日本語で追加
@@ -2284,6 +2504,7 @@ const server = http.createServer((req, res) => {
                             taskRecord.logs.push(`[ERROR] Claude exited with code ${code}`);
                             reject(new Error(`Claude exited with code ${code}`));
                         }
+                        persistTasksImmediate('claude_chat_closed');
                     });
                     
                     child.on('error', (err) => {
@@ -2319,6 +2540,7 @@ const server = http.createServer((req, res) => {
                     taskRecord.updatedAt = new Date().toISOString();
                     taskRecord.logs = taskRecord.logs || [];
                     taskRecord.logs.push(`[ERROR] ${err.message}`);
+                    persistTasksImmediate('claude_chat_error');
                 }
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: err.message }));
@@ -2995,6 +3217,15 @@ if (!resolvedPort) {
     console.warn('[Server] PORT env var missing, defaulting to 7777');
 }
 const PORT = resolvedPort;
+
+process.on('beforeExit', () => {
+    try {
+        if (tasksPersistDirty) persistTasksImmediate('before_exit');
+    } catch (err) {
+        console.error('[Tasks] Failed to flush snapshot on exit:', err.message);
+    }
+});
+
 server.listen(PORT, () => {
     console.log(`Media scanner server running at http://localhost:${PORT}`);
     console.log(`API endpoint: http://localhost:${PORT}/api/scan`);

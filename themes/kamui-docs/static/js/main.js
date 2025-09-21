@@ -1631,6 +1631,8 @@ async function initDocMenuTable() {
         tasks: [],
         lastFetchAt: null,
         backendBase: 'http://localhost:7777',
+        lastPersistAt: null,
+        backendSnapshotAt: null,
         mcpTools: [],
         saasDocs: [],
         modelOptions: MODEL_BLUEPRINTS.map(opt => ({ ...opt })),
@@ -1641,6 +1643,7 @@ async function initDocMenuTable() {
       };
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
+      let syncStatusEl = null;
       const decoder = typeof window.TextDecoder !== 'undefined' ? new TextDecoder() : null;
       const MARKDOWN_INLINE_BOLD = /\*\*([^*]+)\*\*/g;
       const MARKDOWN_INLINE_EM = /\*([^*]+)\*/g;
@@ -1670,6 +1673,43 @@ async function initDocMenuTable() {
         hour: '2-digit',
         hour12: false
       });
+      const syncTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: TASK_TIMEZONE,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+
+      function formatSyncTime(iso){
+        if (!iso) return null;
+        try {
+          const date = new Date(iso);
+          if (Number.isNaN(date.getTime())) return null;
+          return syncTimeFormatter.format(date);
+        } catch (_err) {
+          return null;
+        }
+      }
+
+      function buildSyncStatusMessage(){
+        const parts = [];
+        const localTime = formatSyncTime(state.lastPersistAt);
+        const backendTime = formatSyncTime(state.backendSnapshotAt);
+        if (localTime) parts.push(`ローカル ${localTime}`);
+        if (backendTime) parts.push(`サーバー ${backendTime}`);
+        if (!parts.length) return '保存待機中';
+        return parts.join(' / ');
+      }
+
+      function updateSyncStatusFromState(variant = 'info', overrideMessage = null){
+        if (!syncStatusEl) return;
+        const message = overrideMessage == null ? buildSyncStatusMessage() : overrideMessage;
+        syncStatusEl.textContent = message || '';
+        syncStatusEl.classList.remove('info','success','error');
+        const applied = variant || 'info';
+        syncStatusEl.classList.add(applied);
+        syncStatusEl.setAttribute('aria-hidden', message ? 'false' : 'true');
+      }
 
       function buildBackendWebSocketUrl(base, path) {
         const trimmedPath = path.startsWith('/') ? path : `/${path}`;
@@ -2678,6 +2718,7 @@ async function initDocMenuTable() {
                 appleSessionId: task.externalTerminal.appleSessionId || null
               }
             : null,
+          copyBundle: task.copyBundle && typeof task.copyBundle === 'object' ? task.copyBundle : null,
           completionSummaryPending: task.completionSummaryPending ? true : false,
           completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : '',
           codexPollingDisabled: task.codexPollingDisabled ? true : false,
@@ -2711,6 +2752,7 @@ async function initDocMenuTable() {
                 appleSessionId: record.externalTerminal.appleSessionId || null
               }
             : null,
+          copyBundle: record.copyBundle && typeof record.copyBundle === 'object' ? record.copyBundle : null,
           completionSummaryPending: !!record.completionSummaryPending,
           completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
           codexPollingDisabled: !!record.codexPollingDisabled,
@@ -2758,6 +2800,7 @@ async function initDocMenuTable() {
               logsPayload[key] = value.length > MAX_LOG_LENGTH ? value.slice(-MAX_LOG_LENGTH) : value;
             }
           });
+          const persistedAt = new Date().toISOString();
           const payload = {
             version: STORAGE_VERSION,
             open: !!state.open,
@@ -2765,6 +2808,7 @@ async function initDocMenuTable() {
             logs: logsPayload,
             backendBase: state.backendBase,
             activeModelId: state.activeModelId,
+            backendSnapshotAt: state.backendSnapshotAt,
             heatmapCollapsed: !!state.heatmapCollapsed,
             heatmapSelection: state.heatmapSelection ? {
               dayKey: state.heatmapSelection.dayKey,
@@ -2772,11 +2816,14 @@ async function initDocMenuTable() {
               dayLabel: state.heatmapSelection.dayLabel,
               hourLabel: state.heatmapSelection.hourLabel
             } : null,
-            persistedAt: new Date().toISOString()
+            persistedAt
           };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+          state.lastPersistAt = persistedAt;
+          updateSyncStatusFromState('success');
         } catch(err) {
           console.warn('TaskBoard state persist failed', err);
+          updateSyncStatusFromState('error', 'ローカル保存に失敗しました');
         }
       }
 
@@ -2797,6 +2844,12 @@ async function initDocMenuTable() {
           if (typeof saved.open === 'boolean') state.open = saved.open;
           if (typeof saved.backendBase === 'string' && saved.backendBase) {
             state.backendBase = saved.backendBase;
+          }
+          if (typeof saved.persistedAt === 'string' && saved.persistedAt) {
+            state.lastPersistAt = saved.persistedAt;
+          }
+          if (typeof saved.backendSnapshotAt === 'string' && saved.backendSnapshotAt) {
+            state.backendSnapshotAt = saved.backendSnapshotAt;
           }
           if (Array.isArray(saved.tasks)) {
             const revived = saved.tasks.map(hydrateCachedTask).filter(Boolean);
@@ -2899,6 +2952,90 @@ async function initDocMenuTable() {
         }
       }
 
+      function normalizeBackendTask(record){
+        if (!record || record.id == null) return null;
+        const id = String(record.id);
+        const createdAt = record.createdAt || new Date().toISOString();
+        const updatedAt = record.updatedAt || createdAt;
+        const responseText = typeof record.resultText === 'string'
+          ? record.resultText
+          : (typeof record.stdout === 'string' ? record.stdout.trim() : '');
+        const externalTerminal = record && typeof record.externalTerminal === 'object'
+          ? {
+              sessionId: record.externalTerminal.sessionId ? String(record.externalTerminal.sessionId) : null,
+              app: record.externalTerminal.app || null,
+              command: record.externalTerminal.command || null,
+              appleSessionId: record.externalTerminal.appleSessionId || null
+            }
+          : null;
+        const copyBundle = record && typeof record.copyBundle === 'object' ? record.copyBundle : null;
+        return {
+          id,
+          serverId: id,
+          status: typeof record.status === 'string' && record.status ? record.status : 'running',
+          prompt: typeof record.prompt === 'string' ? record.prompt : '',
+          response: responseText,
+          result: record.resultMeta && typeof record.resultMeta === 'object' ? record.resultMeta : null,
+          error: record.error || null,
+          createdAt,
+          updatedAt,
+          endedAt: record.endedAt || null,
+          exitCode: Number.isFinite(record.exitCode) ? record.exitCode : (typeof record.exitCode === 'string' ? record.exitCode : null),
+          model: record.model || null,
+          provider: record.provider || null,
+          manualDone: record.manualDone ? true : false,
+          completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
+          completionSummaryPending: record.completionSummaryPending ? true : false,
+          logs: [],
+          urls: Array.isArray(record.urls) ? record.urls.slice() : [],
+          files: Array.isArray(record.files) ? record.files.slice() : [],
+          externalTerminal,
+          copyBundle,
+          codexPollingDisabled: record.codexPollingDisabled ? true : false,
+          codexIdleChecks: Number.isFinite(record.codexIdleChecks) ? record.codexIdleChecks : 0,
+          codexHasSeenWorking: record.codexHasSeenWorking ? true : false,
+          codexIsWorking: false
+        };
+      }
+
+      async function fetchServerTasksSnapshot(){
+        try {
+          const base = await probeBackendBase();
+          if (!base) {
+            updateSyncStatusFromState('info');
+            return;
+          }
+          const endpoint = `${base.replace(/\/$/, '')}/api/agent/status`;
+          const res = await fetch(endpoint, { cache: 'no-store' });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const incoming = Array.isArray(data.tasks) ? data.tasks : [];
+          let merged = 0;
+          incoming.forEach((record) => {
+            const task = normalizeBackendTask(record);
+            if (!task) return;
+            mergeTask(task);
+            merged += 1;
+          });
+          if (typeof data.persistedAt === 'string' && data.persistedAt) {
+            state.backendSnapshotAt = data.persistedAt;
+          } else if (merged) {
+            state.backendSnapshotAt = new Date().toISOString();
+          }
+          if (merged) {
+            render();
+          }
+          updateSyncStatusFromState(merged ? 'success' : 'info');
+    } catch (err) {
+      console.warn('Failed to restore tasks from backend:', err);
+      if (!state.backendSnapshotAt) {
+        updateSyncStatusFromState('error', 'バックエンド未接続');
+      } else {
+        updateSyncStatusFromState('info');
+      }
+    }
+  }
+
       function buildModelPayload(model) {
         if (!model || typeof model !== 'object') return { selectedModel: null };
         return { selectedModel: model.id };
@@ -2946,6 +3083,7 @@ async function initDocMenuTable() {
     panel.innerHTML = `
       <div class="taskboard-header">
         <div class="tb-title">エージェントタスク</div>
+        <div class="tb-sync-status info" id="taskboardSyncStatus" aria-live="polite" aria-hidden="true"></div>
         <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false">ヒートマップを表示</button>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
@@ -2977,12 +3115,233 @@ async function initDocMenuTable() {
     const sendEl  = panel.querySelector('#taskboardSend');
     const hideEl  = panel.querySelector('.tb-hide');
     modelToggleEl = panel.querySelector('#taskboardModelBadge');
+    syncStatusEl = panel.querySelector('#taskboardSyncStatus');
+    updateSyncStatusFromState('info');
     updateModelBadge();
     modelToggleEl?.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
       showModelDial();
     });
+
+    let taskContextMenuEl = null;
+    let taskContextMenuCopySource = null;
+    let taskContextMenuBound = false;
+
+    function resetTaskContextMenuLabels() {
+      if (!taskContextMenuEl) return;
+      taskContextMenuEl.querySelectorAll('.tb-context-item').forEach((btn) => {
+        if (btn.dataset && btn.dataset.label) {
+          btn.innerHTML = btn.dataset.label;
+        }
+      });
+    }
+
+    function hideTaskContextMenu() {
+      if (!taskContextMenuEl) return;
+      taskContextMenuEl.classList.remove('is-visible');
+      taskContextMenuEl.setAttribute('aria-hidden', 'true');
+      resetTaskContextMenuLabels();
+      taskContextMenuCopySource = null;
+    }
+
+    async function copyTextToClipboard(text) {
+      if (!text) return false;
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return ok;
+        } catch (err) {
+          console.warn('copy failed', err);
+          return false;
+        }
+      }
+    }
+
+    function buildTaskCopySource(task) {
+      if (!task || typeof task !== 'object') {
+        return { all: '', prompt: '', response: '', summary: '' };
+      }
+      const bundle = task.copyBundle && typeof task.copyBundle === 'object' ? task.copyBundle : null;
+      const prompt = (bundle && typeof bundle.prompt === 'string'
+        ? bundle.prompt
+        : (typeof task.prompt === 'string' ? task.prompt : '')).trim();
+      const response = (bundle && typeof bundle.response === 'string'
+        ? bundle.response
+        : (typeof task.response === 'string' ? task.response : '')).trim();
+      const summary = (bundle && typeof bundle.summary === 'string'
+        ? bundle.summary
+        : (typeof task.completionSummary === 'string' ? task.completionSummary : '')).trim();
+
+      if (bundle && typeof bundle.full === 'string' && bundle.full.trim()) {
+        return {
+          all: bundle.full.trim(),
+          prompt,
+          response,
+          summary
+        };
+      }
+
+      const metaLines = Array.isArray(bundle?.meta)
+        ? bundle.meta.filter(line => typeof line === 'string' && line.trim()).map(line => line.trim())
+        : [];
+      if (!metaLines.length) {
+        metaLines.push(`タスクID: ${task.id}`);
+        if (task.status) metaLines.push(`ステータス: ${task.status}`);
+        if (task.model || task.provider) {
+          const providerLabel = task.provider ? ` / ${task.provider}` : '';
+          metaLines.push(`モデル: ${task.model || '(不明)'}${providerLabel}`.trim());
+        }
+        const startedAt = formatTaskTimestamp(task.createdAt) || (task.createdAt || '');
+        if (startedAt) metaLines.push(`開始: ${startedAt}`);
+        const updatedAt = (task.updatedAt && task.updatedAt !== task.createdAt)
+          ? (formatTaskTimestamp(task.updatedAt) || task.updatedAt)
+          : null;
+        if (updatedAt) metaLines.push(`更新: ${updatedAt}`);
+        if (task.exitCode != null) metaLines.push(`終了コード: ${task.exitCode}`);
+        if (task.externalTerminal && task.externalTerminal.command) {
+          metaLines.push(`外部コマンド: ${task.externalTerminal.command}`);
+        }
+      }
+
+      const sectionBlocks = [];
+      if (prompt) sectionBlocks.push(`【プロンプト】\n${prompt}`);
+      if (response) sectionBlocks.push(`【AIレスポンス】\n${response}`);
+      if (summary) sectionBlocks.push(`【完了まとめ】\n${summary}`);
+
+      const allParts = [];
+      if (metaLines.length) allParts.push(metaLines.join('\n'));
+      if (sectionBlocks.length) allParts.push(sectionBlocks.join('\n\n'));
+      const all = allParts.join('\n\n').trim();
+
+      return { all, prompt, response, summary };
+    }
+
+    function setTaskContextButtonState(action, enabled) {
+      if (!taskContextMenuEl) return;
+      const btn = taskContextMenuEl.querySelector(`[data-action="${action}"]`);
+      if (!btn) return;
+      const isEnabled = !!enabled;
+      btn.disabled = !isEnabled;
+      btn.setAttribute('aria-disabled', isEnabled ? 'false' : 'true');
+      btn.classList.toggle('is-disabled', !isEnabled);
+    }
+
+    function ensureTaskContextMenu() {
+      if (!taskContextMenuEl) {
+        const menu = document.createElement('div');
+        menu.className = 'taskboard-context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-hidden', 'true');
+        menu.innerHTML = `
+          <button type="button" class="tb-context-item" data-action="copy-all" data-label="📋 タスク全体をコピー" role="menuitem">📋 タスク全体をコピー</button>
+          <button type="button" class="tb-context-item" data-action="copy-prompt" data-label="📝 プロンプトをコピー" role="menuitem">📝 プロンプトをコピー</button>
+          <button type="button" class="tb-context-item" data-action="copy-response" data-label="🤖 応答をコピー" role="menuitem">🤖 応答をコピー</button>
+          <button type="button" class="tb-context-item" data-action="copy-summary" data-label="✍️ 完了まとめをコピー" role="menuitem">✍️ 完了まとめをコピー</button>
+        `;
+        document.body.appendChild(menu);
+        taskContextMenuEl = menu;
+      }
+      if (!taskContextMenuBound && taskContextMenuEl) {
+        taskContextMenuEl.addEventListener('click', async (event) => {
+          const btn = event.target.closest('.tb-context-item');
+          if (!btn || btn.disabled) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const action = btn.getAttribute('data-action');
+          if (!action || !taskContextMenuCopySource) return;
+          const map = {
+            'copy-all': taskContextMenuCopySource.all,
+            'copy-prompt': taskContextMenuCopySource.prompt,
+            'copy-response': taskContextMenuCopySource.response,
+            'copy-summary': taskContextMenuCopySource.summary
+          };
+          const targetText = map[action] || '';
+          if (!targetText) return;
+          const original = btn.dataset.label || btn.innerHTML;
+          const ok = await copyTextToClipboard(targetText);
+          if (ok) {
+            btn.innerHTML = '✅ コピーしました';
+            btn.disabled = true;
+            setTimeout(() => {
+              if (btn.dataset && btn.dataset.label) btn.innerHTML = btn.dataset.label;
+              btn.disabled = !!map[action] ? false : true;
+              hideTaskContextMenu();
+            }, 1200);
+          }
+        });
+        const onGlobalClick = (evt) => {
+          if (!taskContextMenuEl) return;
+          if (taskContextMenuEl.contains(evt.target)) return;
+          hideTaskContextMenu();
+        };
+        const onGlobalKeydown = (evt) => {
+          if (evt.key === 'Escape') hideTaskContextMenu();
+        };
+        document.addEventListener('click', onGlobalClick, true);
+        document.addEventListener('keydown', onGlobalKeydown, true);
+        document.addEventListener('scroll', hideTaskContextMenu, true);
+        window.addEventListener('resize', hideTaskContextMenu);
+        taskContextMenuBound = true;
+      }
+      return taskContextMenuEl;
+    }
+
+    function showTaskContextMenu(task, clientX, clientY) {
+      const menu = ensureTaskContextMenu();
+      if (!menu) return;
+      taskContextMenuCopySource = buildTaskCopySource(task);
+      setTaskContextButtonState('copy-all', !!taskContextMenuCopySource.all);
+      setTaskContextButtonState('copy-prompt', !!taskContextMenuCopySource.prompt);
+      setTaskContextButtonState('copy-response', !!taskContextMenuCopySource.response);
+      setTaskContextButtonState('copy-summary', !!taskContextMenuCopySource.summary);
+
+      let left = Math.max(clientX, 8);
+      let top = Math.max(clientY, 8);
+      menu.style.left = `${Math.round(left)}px`;
+      menu.style.top = `${Math.round(top)}px`;
+      menu.classList.add('is-visible');
+      menu.setAttribute('aria-hidden', 'false');
+
+      const rect = menu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) {
+        left = Math.max(8, window.innerWidth - rect.width - 8);
+      }
+      if (rect.bottom > window.innerHeight) {
+        top = Math.max(8, window.innerHeight - rect.height - 8);
+      }
+      menu.style.left = `${Math.round(left)}px`;
+      menu.style.top = `${Math.round(top)}px`;
+    }
+
+    if (listEl && !listEl.dataset.contextBound) {
+      listEl.dataset.contextBound = '1';
+      listEl.addEventListener('contextmenu', (event) => {
+        const targetCard = event.target.closest('.task-item');
+        if (!targetCard) return;
+        const selection = window.getSelection && window.getSelection();
+        if (selection && selection.toString().trim()) return;
+        if (event.shiftKey) return;
+        event.preventDefault();
+        const id = targetCard.getAttribute('data-id');
+        if (!id) return;
+        const task = state.tasks.find((t) => String(t.id) === String(id));
+        if (!task) return;
+        hideTaskContextMenu();
+        showTaskContextMenu(task, event.clientX, event.clientY);
+      });
+    }
     if (heatmapToggleEl) {
       heatmapToggleEl.addEventListener('click', (e) => {
         e.preventDefault();
@@ -4426,6 +4785,7 @@ async function initDocMenuTable() {
     }
 
     function setOpen(open){
+      hideTaskContextMenu();
       state.open = !!open;
       panel.classList.toggle('open', state.open);
       panel.setAttribute('aria-hidden', state.open ? 'false' : 'true');
@@ -4694,7 +5054,11 @@ async function initDocMenuTable() {
     setTimeout(() => {
       console.log('MCP tools state:', state.mcpTools);
     }, 100);
-    
+    fetchServerTasksSnapshot().catch(() => {});
+    setInterval(() => {
+      fetchServerTasksSnapshot().catch(() => {});
+    }, 60000);
+
     // タスクの定期更新
     setInterval(() => {
       const hasRunningOrExternal = state.tasks.some(t => t.status === 'running' || t.status === 'external');
