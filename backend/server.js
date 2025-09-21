@@ -1522,6 +1522,157 @@ function scanDirectory(dirPath, baseDir = null, depth = 0, maxDepth = 5) {
     return result;
 }
 
+function resolveFileKind(type, ext) {
+    if (type && type !== 'other') return type;
+    const lowered = String(ext || '').toLowerCase();
+    if (imageExtensions.includes(lowered)) return 'image';
+    if (videoExtensions.includes(lowered)) return 'video';
+    if (audioExtensions.includes(lowered)) return 'audio';
+    if (htmlExtensions.includes(lowered)) return 'html';
+    if (yamlExtensions.includes(lowered)) return 'yaml';
+    if (jsonExtensions.includes(lowered)) return 'json';
+    if (codeExtensions.includes(lowered)) return 'code';
+    if (textExtensions.includes(lowered)) return 'text';
+    if (docExtensions.includes(lowered)) return 'doc';
+    return 'other';
+}
+
+const GRAPH_GROUP_MAP = {
+    root: 1,
+    folder: 2,
+    image: 3,
+    video: 4,
+    audio: 5,
+    html: 6,
+    yaml: 7,
+    json: 8,
+    code: 9,
+    other: 10,
+    text: 11,
+    doc: 12
+};
+
+function buildDirectoryGraph(scanResult, baseDir) {
+    const nodes = [];
+    const links = [];
+    let nodeId = 0;
+    const stats = {
+        folders: 0,
+        files: 0,
+        images: 0,
+        videos: 0,
+        audio: 0,
+        html: 0,
+        yaml: 0,
+        json: 0,
+        code: 0,
+        text: 0,
+        doc: 0,
+        other: 0
+    };
+
+    const rootId = nodeId++;
+    nodes.push({
+        id: rootId,
+        name: 'ROOT',
+        type: 'root',
+        path: baseDir,
+        group: GRAPH_GROUP_MAP.root
+    });
+
+    function processDirectory(entry, parentId, depth = 0) {
+        if (!entry || typeof entry !== 'object') return;
+
+        const folders = Array.isArray(entry.folders) ? entry.folders : [];
+        folders.forEach(folder => {
+            const folderId = nodeId++;
+            const childFolders = Array.isArray(folder?.items?.folders)
+                ? folder.items.folders.map(child => child.name).filter(Boolean)
+                : [];
+            const childFiles = Array.isArray(folder?.items?.files)
+                ? folder.items.files.map(child => child.name).filter(Boolean)
+                : [];
+
+            nodes.push({
+                id: folderId,
+                name: folder.name,
+                type: 'folder',
+                path: folder.path,
+                group: GRAPH_GROUP_MAP.folder,
+                depth,
+                childFolders: childFolders.slice(0, 20),
+                childFiles: childFiles.slice(0, 20),
+                childFolderCount: childFolders.length,
+                childFileCount: childFiles.length
+            });
+            links.push({ source: parentId, target: folderId });
+            stats.folders += 1;
+
+            if (folder.items) {
+                processDirectory(folder.items, folderId, depth + 1);
+            }
+        });
+
+        const files = Array.isArray(entry.files) ? entry.files : [];
+        files.forEach(file => {
+            const fileId = nodeId++;
+            const ext = (file.ext || path.extname(file.name).slice(1) || '').toLowerCase();
+            const resolvedType = resolveFileKind(file.type, ext);
+            const group = GRAPH_GROUP_MAP[resolvedType] || GRAPH_GROUP_MAP.other;
+
+            nodes.push({
+                id: fileId,
+                name: file.name,
+                type: resolvedType,
+                path: file.path,
+                size: file.size,
+                group,
+                depth,
+                ext,
+                rawType: file.type || resolvedType
+            });
+            links.push({ source: parentId, target: fileId });
+            stats.files += 1;
+
+            switch (resolvedType) {
+                case 'image':
+                    stats.images += 1; break;
+                case 'video':
+                    stats.videos += 1; break;
+                case 'audio':
+                    stats.audio += 1; break;
+                case 'html':
+                    stats.html += 1; break;
+                case 'yaml':
+                    stats.yaml += 1; break;
+                case 'json':
+                    stats.json += 1; break;
+                case 'code':
+                    stats.code += 1; break;
+                case 'text':
+                    stats.text += 1; break;
+                case 'doc':
+                    stats.doc += 1; break;
+                default:
+                    stats.other += 1;
+            }
+        });
+    }
+
+    processDirectory(scanResult, rootId);
+
+    return {
+        baseDir,
+        nodes,
+        links,
+        stats,
+        totals: {
+            nodes: nodes.length,
+            links: links.length
+        }
+    };
+}
+
 // HTTPサーバーの作成
 const server = http.createServer((req, res) => {
     // CORS設定
@@ -1642,12 +1793,24 @@ const server = http.createServer((req, res) => {
         const currentDir = process.env.SCAN_PATH;
         console.log('Scanning directory:', currentDir);
         const mediaFiles = scanDirectory(currentDir);
-        
+
         res.writeHead(200);
         res.end(JSON.stringify({
             baseDir: currentDir,
             data: mediaFiles
         }));
+    } else if (requestUrl.pathname === '/api/directory-graph' && req.method === 'GET') {
+        if (!process.env.SCAN_PATH) {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'SCAN_PATH environment variable is not set' }));
+            return;
+        }
+        const currentDir = process.env.SCAN_PATH;
+        console.log('Building directory graph for:', currentDir);
+        const mediaTree = scanDirectory(currentDir);
+        const graph = buildDirectoryGraph(mediaTree, currentDir);
+        res.writeHead(200);
+        res.end(JSON.stringify(graph));
     } else if (requestUrl.pathname === '/api/open-file' && req.method === 'POST') {
         // ファイルを開く
         let body = '';

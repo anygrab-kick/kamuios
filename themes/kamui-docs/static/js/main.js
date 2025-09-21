@@ -1704,10 +1704,46 @@ async function initDocMenuTable() {
         heatmapSelection: null,
         matrixCollapsed: true,
         matrixSelection: null,
+        graph3dCollapsed: true,
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
       };
+      const GRAPH3D_NODE_COLORS = {
+        root: '#ff4757',
+        folder: '#2ed573',
+        image: '#ffb84d',
+        video: '#6c5ce7',
+        audio: '#eccc68',
+        html: '#a4b0be',
+        yaml: '#6c5ce7',
+        json: '#00d2d3',
+        code: '#ff6b81',
+        other: '#57606f',
+        text: '#70a1ff',
+        doc: '#2f3542'
+      };
+      const GRAPH3D_TYPE_LABELS = {
+        root: 'ルート',
+        folder: 'フォルダ',
+        image: '画像',
+        video: '動画',
+        audio: '音声',
+        html: 'HTML',
+        yaml: 'YAML',
+        json: 'JSON',
+        code: 'コード',
+        text: 'テキスト',
+        doc: 'ドキュメント',
+        other: 'その他'
+      };
+      const externalScriptPromises = Object.create(null);
+      let graph3dInstance = null;
+      let graph3dDataCache = null;
+      let graph3dPinnedNode = null;
+      let graph3dLoadPromise = null;
+      let graph3dCanvasContainer = null;
+      let graph3dResizeObserver = null;
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -2535,8 +2571,13 @@ async function initDocMenuTable() {
     function setHeatmapCollapsed(nextValue) {
       const next = !!nextValue;
       if (state.heatmapCollapsed === next) return;
-      if (!next && !state.matrixCollapsed) {
-        setMatrixCollapsed(true);
+      if (!next) {
+        if (!state.matrixCollapsed) {
+          setMatrixCollapsed(true);
+        }
+        if (!state.graph3dCollapsed) {
+          setGraph3dCollapsed(true);
+        }
       }
       state.heatmapCollapsed = next;
       updateHeatmapToggleLabel();
@@ -2580,14 +2621,21 @@ async function initDocMenuTable() {
     function updateViewMode() {
       const heatmapActive = !state.heatmapCollapsed;
       const matrixActive = !state.matrixCollapsed;
+      const graph3dActive = !state.graph3dCollapsed;
       if (heatmapEl) {
         heatmapEl.style.display = heatmapActive ? '' : 'none';
       }
       if (matrixEl) {
         matrixEl.style.display = matrixActive ? '' : 'none';
       }
+      if (graph3dEl) {
+        graph3dEl.style.display = graph3dActive ? '' : 'none';
+        graph3dEl.classList.toggle('collapsed', !graph3dActive);
+      }
       if (analyticsEl) {
-        analyticsEl.style.display = (heatmapActive || matrixActive) ? '' : 'none';
+        const show = heatmapActive || matrixActive || graph3dActive;
+        analyticsEl.style.display = show ? '' : 'none';
+        analyticsEl.classList.toggle('collapsed', !show);
       }
       if (listEl) {
         listEl.classList.remove('is-hidden');
@@ -2756,8 +2804,13 @@ async function initDocMenuTable() {
     function setMatrixCollapsed(nextValue) {
       const next = !!nextValue;
       if (state.matrixCollapsed === next) return;
-      if (!next && !state.heatmapCollapsed) {
-        setHeatmapCollapsed(true);
+      if (!next) {
+        if (!state.heatmapCollapsed) {
+          setHeatmapCollapsed(true);
+        }
+        if (!state.graph3dCollapsed) {
+          setGraph3dCollapsed(true);
+        }
       }
       if (next) {
         clearMatrixSelection({ silent: true });
@@ -3103,6 +3156,7 @@ async function initDocMenuTable() {
               importance: state.matrixSelection.importance,
               urgency: state.matrixSelection.urgency
             } : null,
+            graph3dCollapsed: !!state.graph3dCollapsed,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3139,6 +3193,9 @@ async function initDocMenuTable() {
           }
           if (typeof saved.matrixCollapsed === 'boolean') {
             state.matrixCollapsed = saved.matrixCollapsed;
+          }
+          if (typeof saved.graph3dCollapsed === 'boolean') {
+            state.graph3dCollapsed = saved.graph3dCollapsed;
           }
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
@@ -3395,6 +3452,7 @@ async function initDocMenuTable() {
         <div class="tb-header-toggles">
           <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="4" height="4" rx="1"></rect><rect x="7" y="2" width="4" height="4" rx="1"></rect><rect x="12" y="2" width="2" height="4" rx="1"></rect><rect x="2" y="7" width="4" height="4" rx="1"></rect><rect x="7" y="7" width="4" height="4" rx="1"></rect><rect x="12" y="7" width="2" height="4" rx="1"></rect><rect x="2" y="12" width="4" height="2" rx="1"></rect><rect x="7" y="12" width="4" height="2" rx="1"></rect><rect x="12" y="12" width="2" height="2" rx="1"></rect></svg></span><span class="tb-toggle-label">ヒートマップ</span></button>
           <button type="button" id="taskboardMatrixToggle" class="tb-matrix-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="9" width="5.5" height="5.5" rx="1"></rect></svg></span><span class="tb-toggle-label">マトリクス</span></button>
+          <button type="button" id="taskboard3dToggle" class="tb-3d-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1.1 2 4v8l5.5 2.9L13 12V4L7.5 1.1Zm0 1.8 3.8 2L7.5 7 3.7 4.9l3.8-2Zm-4 2.9L7 8.7v4L3.5 11V5.8Zm5.5 6.9v-4l3.5-1.8V11l-3.5 1.7Z"/></svg></span><span class="tb-toggle-label">3Dシステム</span></button>
         </div>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
@@ -3404,6 +3462,31 @@ async function initDocMenuTable() {
         <div class="tb-heatmap-legend" id="taskboardHeatmapLegend"></div>
         <div class="taskboard-heatmap" id="taskboardHeatmap" role="img" aria-label="直近14日間の時間帯別タスク数ヒートマップ"></div>
         <div class="taskboard-matrix" id="taskboardMatrix" role="img" aria-label="重要度と緊急度のマトリクス"></div>
+        <div class="taskboard-3d" id="taskboard3d" role="region" aria-label="システムディレクトリ3Dビュー">
+          <div class="tb-3d-wrapper">
+            <div class="tb-3d-canvas" id="taskboard3dCanvas" aria-live="polite">
+              <div class="tb-3d-placeholder" id="taskboard3dStatus">3Dビューは未読み込みです。</div>
+            </div>
+            <div class="tb-3d-side">
+              <div class="tb-3d-side-header">
+                <h3 class="tb-3d-title">ノード情報</h3>
+                <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み">再読み込み</button>
+              </div>
+              <div class="tb-3d-base">ベースディレクトリ: <code id="taskboard3dBase">-</code></div>
+              <dl class="tb-3d-meta">
+                <dt>名前</dt><dd id="taskboard3dNodeName">-</dd>
+                <dt>種別</dt><dd id="taskboard3dNodeType">-</dd>
+                <dt>パス</dt><dd id="taskboard3dNodePath">-</dd>
+                <dt>サイズ</dt><dd id="taskboard3dNodeSize">-</dd>
+              </dl>
+              <div class="tb-3d-stats">
+                <h4>統計</h4>
+                <ul id="taskboard3dStats" class="tb-3d-stats-list"></ul>
+              </div>
+              <div class="tb-3d-tip">ノードにカーソルを合わせるかクリックすると詳細が表示されます。</div>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
@@ -3449,6 +3532,17 @@ async function initDocMenuTable() {
     const heatmapToggleEl = panel.querySelector('#taskboardHeatmapToggle');
     const matrixEl = panel.querySelector('#taskboardMatrix');
     const matrixToggleEl = panel.querySelector('#taskboardMatrixToggle');
+    const graph3dEl = panel.querySelector('#taskboard3d');
+    const graph3dToggleEl = panel.querySelector('#taskboard3dToggle');
+    const graph3dCanvasEl = panel.querySelector('#taskboard3dCanvas');
+    const graph3dStatusEl = panel.querySelector('#taskboard3dStatus');
+    const graph3dNodeNameEl = panel.querySelector('#taskboard3dNodeName');
+    const graph3dNodeTypeEl = panel.querySelector('#taskboard3dNodeType');
+    const graph3dNodePathEl = panel.querySelector('#taskboard3dNodePath');
+    const graph3dNodeSizeEl = panel.querySelector('#taskboard3dNodeSize');
+    const graph3dBaseEl = panel.querySelector('#taskboard3dBase');
+    const graph3dStatsEl = panel.querySelector('#taskboard3dStats');
+    const graph3dReloadEl = panel.querySelector('#taskboard3dReload');
     const analyticsEl = panel.querySelector('.taskboard-analytics');
     const inputEl = panel.querySelector('#taskboardInput');
     const importanceEl = panel.querySelector('#taskboardImportance');
@@ -3459,6 +3553,393 @@ async function initDocMenuTable() {
     const hideEl  = panel.querySelector('.tb-hide');
     modelToggleEl = panel.querySelector('#taskboardModelBadge');
     syncStatusEl = panel.querySelector('#taskboardSyncStatus');
+
+    function formatNumber(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '0';
+      return num.toLocaleString('ja-JP');
+    }
+
+    function formatBytes(value) {
+      const size = Number(value);
+      if (!Number.isFinite(size) || size < 0) return '-';
+      if (size === 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const idx = Math.min(units.length - 1, Math.floor(Math.log(size) / Math.log(1024)));
+      const val = size / Math.pow(1024, idx);
+      return `${val >= 10 ? val.toFixed(0) : val.toFixed(1)} ${units[idx]}`;
+    }
+
+    function loadExternalScriptOnce(url, checker) {
+      if (typeof checker === 'function') {
+        try {
+          const existing = checker();
+          if (existing) return Promise.resolve(existing);
+        } catch (_) {}
+      }
+      if (!externalScriptPromises[url]) {
+        externalScriptPromises[url] = new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = url;
+          script.async = true;
+          script.onload = () => {
+            try {
+              resolve(typeof checker === 'function' ? (checker() || true) : true);
+            } catch (err) {
+              resolve(true);
+            }
+          };
+          script.onerror = () => reject(new Error(`Failed to load ${url}`));
+          document.head.appendChild(script);
+        });
+      }
+      return externalScriptPromises[url].then(result => {
+        if (result) return result;
+        if (typeof checker === 'function') {
+          try {
+            const checked = checker();
+            if (checked) return checked;
+          } catch (_) {}
+        }
+        return true;
+      });
+    }
+
+    function ensureThreeLibrary() {
+      if (window.THREE) return Promise.resolve(window.THREE);
+      return loadExternalScriptOnce('//cdn.jsdelivr.net/npm/three@0.158/build/three.min.js', () => window.THREE);
+    }
+
+    async function ensureForceGraphLibrary() {
+      if (window.ForceGraph3D) return window.ForceGraph3D;
+      await ensureThreeLibrary();
+      return loadExternalScriptOnce('//cdn.jsdelivr.net/npm/3d-force-graph', () => window.ForceGraph3D);
+    }
+
+    function graph3dSetStatus(message, mode = 'info') {
+      if (!graph3dStatusEl) return;
+      const text = typeof message === 'string' ? message : '';
+      graph3dStatusEl.textContent = text;
+      graph3dStatusEl.classList.remove('is-error', 'is-loading', 'is-success', 'is-hidden');
+      if (!text) {
+        graph3dStatusEl.classList.add('is-hidden');
+        return;
+      }
+      if (mode === 'error') graph3dStatusEl.classList.add('is-error');
+      else if (mode === 'loading') graph3dStatusEl.classList.add('is-loading');
+      else if (mode === 'success') graph3dStatusEl.classList.add('is-success');
+    }
+
+    function resetGraph3dInfo() {
+      if (graph3dNodeNameEl) graph3dNodeNameEl.textContent = '-';
+      if (graph3dNodeTypeEl) graph3dNodeTypeEl.textContent = '-';
+      if (graph3dNodePathEl) graph3dNodePathEl.textContent = '-';
+      if (graph3dNodeSizeEl) graph3dNodeSizeEl.textContent = '-';
+    }
+
+    function applyGraph3dInfo(node) {
+      if (!node) {
+        resetGraph3dInfo();
+        return;
+      }
+      if (graph3dNodeNameEl) graph3dNodeNameEl.textContent = node.name || '-';
+      if (graph3dNodeTypeEl) graph3dNodeTypeEl.textContent = GRAPH3D_TYPE_LABELS[node.type] || node.type || '-';
+      if (graph3dNodePathEl) {
+        if (node.type === 'root') {
+          graph3dNodePathEl.textContent = graph3dDataCache?.baseDir || '-';
+        } else {
+          graph3dNodePathEl.textContent = node.path || '-';
+        }
+      }
+      if (graph3dNodeSizeEl) {
+        if (node.type === 'folder') {
+          const folders = formatNumber(node.childFolderCount || 0);
+          const files = formatNumber(node.childFileCount || 0);
+          graph3dNodeSizeEl.textContent = `${folders} フォルダ / ${files} ファイル`;
+        } else if (node.type === 'root') {
+          const folderTotal = formatNumber(graph3dDataCache?.stats?.folders || 0);
+          const fileTotal = formatNumber(graph3dDataCache?.stats?.files || 0);
+          graph3dNodeSizeEl.textContent = `${folderTotal} フォルダ / ${fileTotal} ファイル`;
+        } else {
+          graph3dNodeSizeEl.textContent = Number.isFinite(Number(node.size)) ? formatBytes(node.size) : '-';
+        }
+      }
+    }
+
+    function updateGraph3dStats(stats, totals) {
+      if (!graph3dStatsEl) return;
+      if (!stats) {
+        graph3dStatsEl.innerHTML = '<li class="tb-3d-stat-item">データなし</li>';
+        return;
+      }
+      const entries = [
+        ['フォルダ', stats.folders],
+        ['ファイル', stats.files],
+        ['画像', stats.images],
+        ['動画', stats.videos],
+        ['音声', stats.audio],
+        ['コード', stats.code],
+        ['テキスト', stats.text],
+        ['ドキュメント', stats.doc],
+        ['HTML', stats.html],
+        ['YAML', stats.yaml],
+        ['JSON', stats.json],
+        ['その他', stats.other]
+      ];
+      const filtered = entries.filter(([, value]) => Number(value) > 0);
+      const rows = (filtered.length ? filtered : [['データなし', 0]]).map(([label, value]) => {
+        return `<li class="tb-3d-stat-item"><span class="tb-3d-stat-label">${escapeHtml(label)}</span><span class="tb-3d-stat-value">${label === 'データなし' ? '-' : formatNumber(value)}</span></li>`;
+      });
+      if (totals && Number.isFinite(Number(totals.nodes))) {
+        rows.unshift(`<li class="tb-3d-stat-item tb-3d-stat-total"><span class="tb-3d-stat-label">ノード</span><span class="tb-3d-stat-value">${formatNumber(totals.nodes)}</span></li>`);
+      }
+      graph3dStatsEl.innerHTML = rows.join('');
+    }
+
+    function prepareGraph3dCanvasContainer() {
+      if (!graph3dCanvasEl) return null;
+      if (!graph3dCanvasContainer || !graph3dCanvasContainer.isConnected) {
+        graph3dCanvasContainer = document.createElement('div');
+        graph3dCanvasContainer.className = 'tb-3d-canvas-inner';
+        graph3dCanvasEl.appendChild(graph3dCanvasContainer);
+      }
+      return graph3dCanvasContainer;
+    }
+
+    function setupGraph3dScene(ForceGraphFactory, data) {
+      if (!graph3dCanvasEl) return;
+      if (graph3dInstance && typeof graph3dInstance._destructor === 'function') {
+        try { graph3dInstance._destructor(); } catch (_) {}
+      }
+      const container = prepareGraph3dCanvasContainer();
+      if (!container) return;
+      container.innerHTML = '';
+      if (graph3dStatusEl) graph3dStatusEl.classList.add('is-hidden');
+      resetGraph3dInfo();
+      const forceGraphFn = typeof ForceGraphFactory === 'function' ? ForceGraphFactory : window.ForceGraph3D;
+      if (typeof forceGraphFn !== 'function') return;
+      const graphInitializer = forceGraphFn();
+      if (typeof graphInitializer !== 'function') return;
+      const Graph = graphInitializer(container);
+      if (!Graph) return;
+      try {
+        if (graph3dResizeObserver && typeof graph3dResizeObserver.disconnect === 'function') {
+          graph3dResizeObserver.disconnect();
+        }
+      } catch (_) {}
+      Graph.backgroundColor('#000003')
+        .graphData({ nodes: Array.isArray(data?.nodes) ? data.nodes : [], links: Array.isArray(data?.links) ? data.links : [] })
+        .nodeLabel(node => `${node.name || ''}\n${GRAPH3D_TYPE_LABELS[node.type] || node.type || ''}`)
+        .nodeColor(node => GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other)
+        .nodeOpacity(0.9)
+        .nodeVal(node => {
+          if (node.type === 'root') return 28;
+          if (node.type === 'folder') return 14;
+          if (node.type === 'video') return 10;
+          if (node.type === 'image') return 8;
+          return 6;
+        })
+        .linkOpacity(0.16)
+        .linkWidth(0.6)
+        .linkDirectionalParticles(0);
+
+      Graph.onNodeHover(node => {
+        if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
+        graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+      });
+      Graph.onNodeClick(node => {
+        if (!node) return;
+        if (graph3dPinnedNode && graph3dPinnedNode.id === node.id) {
+          graph3dPinnedNode = null;
+          applyGraph3dInfo(node);
+        } else {
+          graph3dPinnedNode = node;
+          applyGraph3dInfo(node);
+        }
+        const camera = Graph.camera();
+        if (!camera) return;
+        const distance = 180;
+        const x = node.x || 0;
+        const y = node.y || 0;
+        const z = node.z || 0;
+        const length = Math.max(Math.hypot(x, y, z), 1);
+        const ratio = 1 + distance / length;
+        Graph.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, node, 600);
+      });
+
+      if (typeof Graph.onBackgroundClick === 'function') {
+        Graph.onBackgroundClick(() => {
+          graph3dPinnedNode = null;
+          applyGraph3dInfo(null);
+        });
+      }
+
+      try {
+        Graph.d3Force('link').distance(48);
+        Graph.d3Force('charge').strength(-120);
+      } catch (_) {}
+
+      let graphFitTimer = null;
+      const attemptFit = (delay = 0) => {
+        if (graphFitTimer) {
+          clearTimeout(graphFitTimer);
+          graphFitTimer = null;
+        }
+        graphFitTimer = setTimeout(() => {
+          try {
+            const controls = Graph.controls && Graph.controls();
+            if (controls && controls.target) {
+              controls.target.set(0, 0, 0);
+              controls.update && controls.update();
+              controls.enableDamping = true;
+              controls.dampingFactor = 0.08;
+            }
+            Graph.cameraPosition({ x: 0, y: 0, z: 900 }, { x: 0, y: 0, z: 0 }, 0);
+            Graph.zoomToFit(600, 120);
+          } catch (_) {}
+        }, delay);
+      };
+
+      const applyGraphDimensions = (width, height, triggerFit = false) => {
+        if (!graph3dInstance) return;
+        let w = width;
+        let h = height;
+        if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
+          const rect = graph3dCanvasEl.getBoundingClientRect();
+          w = rect.width;
+          h = rect.height;
+        }
+        const safeWidth = Math.max(160, Math.floor(w || 0));
+        const safeHeight = Math.max(160, Math.floor(h || 0));
+        if (typeof graph3dInstance.width === 'function') {
+          graph3dInstance.width(safeWidth);
+        }
+        if (typeof graph3dInstance.height === 'function') {
+          graph3dInstance.height(safeHeight);
+        }
+        if (triggerFit) attemptFit(200);
+      };
+
+      try {
+        graph3dInstance = Graph;
+        applyGraphDimensions(graph3dCanvasEl.clientWidth, graph3dCanvasEl.clientHeight, false);
+        if (typeof Graph.refresh === 'function') {
+          Graph.refresh();
+        }
+        attemptFit(400);
+        if (typeof Graph.onEngineStop === 'function') {
+          Graph.onEngineStop(() => {
+            attemptFit(0);
+          });
+        }
+        if (typeof ResizeObserver !== 'undefined') {
+          graph3dResizeObserver = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+              if (entry.target === graph3dCanvasEl) {
+                const { width: w, height: h } = entry.contentRect || {};
+                applyGraphDimensions(w, h, true);
+              }
+            }
+          });
+          graph3dResizeObserver.observe(graph3dCanvasEl);
+        }
+        setTimeout(() => {
+          if (container && !container.querySelector('canvas')) {
+            graph3dSetStatus('3Dビューの初期化に失敗しました。', 'error');
+          }
+        }, 1200);
+      } catch (_) {}
+
+      const rootNode = Array.isArray(data?.nodes) ? data.nodes.find(n => n.type === 'root') : null;
+      if (rootNode) applyGraph3dInfo(rootNode);
+    }
+
+    async function ensureGraph3dInitialized(options = {}) {
+      if (state.graph3dCollapsed) return null;
+      const { forceReload = false } = options || {};
+      if (graph3dLoadPromise) return graph3dLoadPromise;
+      if (!forceReload && graph3dInstance && graph3dDataCache) {
+        graph3dSetStatus('', 'success');
+        return Promise.resolve(graph3dInstance);
+      }
+      graph3dLoadPromise = (async () => {
+        graph3dSetStatus('ディレクトリを解析中...', 'loading');
+        if (graph3dReloadEl) {
+          graph3dReloadEl.disabled = true;
+          graph3dReloadEl.classList.add('is-loading');
+        }
+        graph3dPinnedNode = null;
+        try {
+          const ForceGraphFactory = await ensureForceGraphLibrary();
+          const base = await probeBackendBase();
+          if (!base) throw new Error('バックエンドに接続できません');
+          const endpoint = `${base.replace(/\/$/, '')}/api/directory-graph`;
+          const res = await fetch(endpoint, { cache: 'no-store' });
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error(text ? `${res.status} ${text}` : `HTTP ${res.status}`);
+          }
+          const data = await res.json();
+          graph3dDataCache = data;
+          const nodeCount = Array.isArray(data?.nodes) ? data.nodes.length : 0;
+          const linkCount = Array.isArray(data?.links) ? data.links.length : 0;
+          console.log('[Taskboard][3D] graph data', { nodes: nodeCount, links: linkCount, baseDir: data?.baseDir });
+          if (graph3dBaseEl) graph3dBaseEl.textContent = data.baseDir || '-';
+          updateGraph3dStats(data.stats, data.totals);
+          setupGraph3dScene(ForceGraphFactory, data);
+          if (!nodeCount || nodeCount <= 1) {
+            graph3dSetStatus('表示できるノードがありません。SCAN_PATHの内容を確認してください。', 'info');
+          } else {
+            graph3dSetStatus('', 'success');
+          }
+          return graph3dInstance;
+        } catch (err) {
+          graph3dSetStatus(err && err.message ? `エラー: ${err.message}` : '3Dビューの読み込みに失敗しました。', 'error');
+          throw err;
+        } finally {
+          if (graph3dReloadEl) {
+            graph3dReloadEl.disabled = false;
+            graph3dReloadEl.classList.remove('is-loading');
+          }
+          graph3dLoadPromise = null;
+        }
+      })();
+      return graph3dLoadPromise;
+    }
+
+    function updateGraph3dToggleLabel() {
+      if (!graph3dToggleEl) return;
+      graph3dToggleEl.setAttribute('aria-expanded', state.graph3dCollapsed ? 'false' : 'true');
+      graph3dToggleEl.classList.toggle('is-active', !state.graph3dCollapsed);
+    }
+
+    function renderGraph3dPanel() {
+      updateGraph3dToggleLabel();
+      updateViewMode();
+      if (state.graph3dCollapsed) {
+        graph3dSetStatus('', 'info');
+        resetGraph3dInfo();
+        return;
+      }
+      ensureGraph3dInitialized().catch(() => {});
+    }
+
+    function setGraph3dCollapsed(nextValue) {
+      const next = !!nextValue;
+      if (state.graph3dCollapsed === next) return;
+      if (!next) {
+        if (!state.heatmapCollapsed) setHeatmapCollapsed(true);
+        if (!state.matrixCollapsed) setMatrixCollapsed(true);
+      }
+      state.graph3dCollapsed = next;
+      renderGraph3dPanel();
+      if (!next) setOpen(true);
+      schedulePersist();
+      if (next && graph3dResizeObserver && typeof graph3dResizeObserver.disconnect === 'function') {
+        try { graph3dResizeObserver.disconnect(); } catch (_) {}
+        graph3dResizeObserver = null;
+      }
+    }
     updateSyncStatusFromState('info');
     updateModelBadge();
     if (importanceEl) {
@@ -3726,6 +4207,28 @@ async function initDocMenuTable() {
       updateMatrixToggleLabel();
     } else {
       updateMatrixToggleLabel();
+    }
+    if (graph3dToggleEl) {
+      graph3dToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (state.graph3dCollapsed) {
+          setGraph3dCollapsed(false);
+        } else {
+          setGraph3dCollapsed(true);
+        }
+      });
+      updateGraph3dToggleLabel();
+    } else {
+      updateGraph3dToggleLabel();
+    }
+    if (graph3dReloadEl) {
+      graph3dReloadEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (state.graph3dCollapsed) {
+          setGraph3dCollapsed(false);
+        }
+        ensureGraph3dInitialized({ forceReload: true }).catch(() => {});
+      });
     }
     updateViewMode();
     if (matrixEl && !matrixEl.dataset.bound) {
@@ -4861,6 +5364,7 @@ async function initDocMenuTable() {
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
         renderHeatmap();
         renderPriorityMatrix();
+        renderGraph3dPanel();
         return;
       }
 
@@ -5155,6 +5659,7 @@ async function initDocMenuTable() {
 
       renderHeatmap();
       renderPriorityMatrix();
+      renderGraph3dPanel();
 
       listEl.querySelectorAll('[data-action="clear-heatmap-filter"]').forEach(btn => {
         if (btn.dataset.bound === '1') return;
