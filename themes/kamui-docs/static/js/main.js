@@ -1586,9 +1586,12 @@ async function initDocMenuTable() {
       window.__aiTaskBoardInit = true;
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
-      const STORAGE_KEY = 'kamui_task_board_v1';
-      const STORAGE_VERSION = 4;
-      const STORAGE_BACKUP_KEY = 'kamui_task_board_backup';
+      // ストレージモジュールは別ファイル(taskboard-storage.js)で管理
+      const storageModule = window.KamuiTaskBoardStorage || null;
+      if (!storageModule) {
+        console.error('[TaskBoard] Storage module not loaded! Make sure taskboard-storage.js is included.');
+        return;
+      }
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
@@ -3058,23 +3061,10 @@ async function initDocMenuTable() {
         }
       }
 
-      function backupCurrentData(){
-        try {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) {
-            localStorage.setItem(STORAGE_BACKUP_KEY, raw);
-            console.log('Created backup of task board data');
-          }
-        } catch (err) {
-          console.error('Failed to backup data:', err);
-        }
-      }
+      // バックアップ機能はstorageModuleで自動的に行われる
 
       function persistNow(){
         try {
-          // 現在のデータをバックアップ（念のため）
-          backupCurrentData();
-          
           const prepared = state.tasks.slice(0, MAX_TASK_HISTORY).map(cloneTaskForStorage).filter(Boolean);
           const keepKeys = new Set(prepared.map(task => (task.serverId ? String(task.serverId) : String(task.id))).filter(Boolean));
           const logsPayload = {};
@@ -3084,9 +3074,7 @@ async function initDocMenuTable() {
               logsPayload[key] = value.length > MAX_LOG_LENGTH ? value.slice(-MAX_LOG_LENGTH) : value;
             }
           });
-          const persistedAt = new Date().toISOString();
           const payload = {
-            version: STORAGE_VERSION,
             open: !!state.open,
             tasks: prepared,
             logs: logsPayload,
@@ -3106,12 +3094,15 @@ async function initDocMenuTable() {
               urgency: state.matrixSelection.urgency
             } : null,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
-            composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium'),
-            persistedAt
+            composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-          state.lastPersistAt = persistedAt;
-          updateSyncStatusFromState('success');
+          const savedAt = storageModule.save(payload);
+          if (savedAt) {
+            state.lastPersistAt = savedAt;
+            updateSyncStatusFromState('success');
+          } else {
+            updateSyncStatusFromState('error', '保存に失敗しました');
+          }
         } catch(err) {
           console.warn('TaskBoard state persist failed', err);
           updateSyncStatusFromState('error', 'ローカル保存に失敗しました');
@@ -3124,31 +3115,8 @@ async function initDocMenuTable() {
 
       function loadPersistedState(){
         try {
-          let raw = localStorage.getItem(STORAGE_KEY);
-          
-          // メインデータがない場合、バックアップから復元を試みる
-          if (!raw) {
-            const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
-            if (backup) {
-              console.warn('Main data not found, attempting to restore from backup...');
-              raw = backup;
-              // バックアップからメインに復元
-              localStorage.setItem(STORAGE_KEY, backup);
-            } else {
-              return;
-            }
-          }
-          
-          const saved = JSON.parse(raw);
+          const saved = storageModule.load();
           if (!saved || typeof saved !== 'object') return;
-          // バージョンが異なる場合でもデータを削除せず、可能な限り移行する
-          if (saved.version !== STORAGE_VERSION) {
-            console.warn(`LocalStorage version mismatch: expected ${STORAGE_VERSION}, got ${saved.version}. Attempting migration...`);
-            // 古いバージョンのデータでも、tasksがあれば読み込む
-            if (saved.tasks && Array.isArray(saved.tasks)) {
-              console.log(`Migrating ${saved.tasks.length} tasks from version ${saved.version} to ${STORAGE_VERSION}`);
-            }
-          }
           if (typeof saved.open === 'boolean') state.open = saved.open;
           if (typeof saved.backendBase === 'string' && saved.backendBase) {
             state.backendBase = saved.backendBase;
@@ -5825,65 +5793,7 @@ async function initDocMenuTable() {
     // 初回は即座に実行
     setTimeout(updateCodexTaskStatuses, 100);
     
-    // グローバルに復旧用関数を公開（コンソールから実行可能）
-    window.kamuiTaskBoardRecover = function() {
-      const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
-      if (!backup) {
-        console.error('バックアップデータが見つかりません');
-        return false;
-      }
-      try {
-        const backupData = JSON.parse(backup);
-        console.log(`バックアップデータ: ${backupData.tasks?.length || 0}個のタスク`);
-        console.log('バックアップ時刻:', backupData.persistedAt);
-        if (confirm('バックアップからタスクを復元しますか？現在のデータは上書きされます。')) {
-          localStorage.setItem(STORAGE_KEY, backup);
-          location.reload();
-          return true;
-        }
-      } catch (err) {
-        console.error('バックアップデータの解析に失敗:', err);
-      }
-      return false;
-    };
-    
-    // 現在のデータを確認する関数も公開
-    window.kamuiTaskBoardStatus = function() {
-      const current = localStorage.getItem(STORAGE_KEY);
-      const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
-      
-      console.log('=== タスクボード ストレージ状態 ===');
-      
-      if (current) {
-        try {
-          const currentData = JSON.parse(current);
-          console.log('現在のデータ:');
-          console.log(`  - タスク数: ${currentData.tasks?.length || 0}`);
-          console.log(`  - 保存時刻: ${currentData.persistedAt || '不明'}`);
-          console.log(`  - バージョン: ${currentData.version || '不明'}`);
-        } catch (err) {
-          console.error('現在のデータ解析エラー:', err);
-        }
-      } else {
-        console.log('現在のデータ: なし');
-      }
-      
-      if (backup) {
-        try {
-          const backupData = JSON.parse(backup);
-          console.log('\nバックアップデータ:');
-          console.log(`  - タスク数: ${backupData.tasks?.length || 0}`);
-          console.log(`  - 保存時刻: ${backupData.persistedAt || '不明'}`);
-          console.log(`  - バージョン: ${backupData.version || '不明'}`);
-        } catch (err) {
-          console.error('バックアップデータ解析エラー:', err);
-        }
-      } else {
-        console.log('\nバックアップデータ: なし');
-      }
-      
-      console.log('\n復元するには: window.kamuiTaskBoardRecover()');
-    };
+    // ストレージ操作のグローバル関数は taskboard-storage.js 側で提供
     
   } catch(err) {
     console.error('TaskBoard init failed', err);
