@@ -1751,6 +1751,8 @@ async function initDocMenuTable() {
       let graph3dModeColorEl = null;
       let graph3dSphereGeometry = null;
       let graph3dNodeObjectCache = new Map();
+      let graph3dVideoResources = new Map();
+      let graph3dActiveVideoKey = null;
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -3711,7 +3713,8 @@ async function initDocMenuTable() {
         graph3dSphereGeometry = new THREE.SphereGeometry(1, 36, 36);
       }
       if (cacheKey && graph3dNodeObjectCache.has(cacheKey)) {
-        return graph3dNodeObjectCache.get(cacheKey);
+        const cached = graph3dNodeObjectCache.get(cacheKey);
+        return cached?.object || cached;
       }
       const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other);
       const material = new THREE.MeshStandardMaterial({
@@ -3726,7 +3729,7 @@ async function initDocMenuTable() {
       const mesh = new THREE.Mesh(graph3dSphereGeometry, material);
       const nodeSize = node.type === 'root' ? 18 : node.type === 'folder' ? 11 : 8;
       mesh.scale.set(nodeSize, nodeSize, nodeSize);
-      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, mesh);
+      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: mesh, resourceKey: null });
       return mesh;
     }
 
@@ -3797,7 +3800,7 @@ async function initDocMenuTable() {
       });
     }
 
-    function loadVideoTexture(node) {
+    function loadVideoResource(node, key) {
       return new Promise((resolve, reject) => {
         if (!window.THREE) {
           reject(new Error('THREE unavailable'));
@@ -3810,54 +3813,83 @@ async function initDocMenuTable() {
         video.playsInline = true;
         video.preload = 'auto';
         video.src = url;
+        let rafId = null;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('canvas_context_unavailable'));
+          return;
+        }
+        const texture = new THREE.Texture(canvas);
+        texture.needsUpdate = true;
+        texture.colorSpace = THREE.SRGBColorSpace || texture.colorSpace;
 
-        const cleanup = () => {
+        const stop = () => {
           try { video.pause(); } catch (_) {}
-          video.removeAttribute('src');
-          video.load();
-        };
-
-        const handleLoaded = () => {
-          try {
-            const width = video.videoWidth || 640;
-            const height = video.videoHeight || 360;
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) throw new Error('canvas_context_unavailable');
-            ctx.drawImage(video, 0, 0, width, height);
-            const texture = new THREE.Texture(canvas);
-            texture.needsUpdate = true;
-            texture.colorSpace = THREE.SRGBColorSpace || texture.colorSpace;
-            resolve(texture);
-          } catch (err) {
-            reject(err);
-          } finally {
-            cleanup();
+          if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
           }
         };
 
+        const renderFrame = () => {
+          if (!video.paused && !video.ended) {
+            try {
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              texture.needsUpdate = true;
+            } catch (_) {}
+            rafId = requestAnimationFrame(renderFrame);
+          }
+        };
+
+        const play = () => {
+          if (video.readyState < 2) return;
+          try {
+            video.play().catch(() => {});
+            if (!rafId) {
+              renderFrame();
+            }
+          } catch (_) {}
+        };
+
+        const dispose = () => {
+          stop();
+          video.removeAttribute('src');
+          video.load();
+          graph3dVideoResources.delete(key);
+        };
+
         video.addEventListener('loadedmetadata', () => {
+          const width = video.videoWidth || 640;
+          const height = video.videoHeight || 360;
+          canvas.width = width;
+          canvas.height = height;
           try {
             const targetTime = Math.min(0.12, (video.duration || 0.12) - 0.01);
             video.currentTime = Math.max(0, targetTime);
           } catch (_) {}
         }, { once: true });
-        video.addEventListener('loadeddata', handleLoaded, { once: true });
-        video.addEventListener('error', (event) => {
-          cleanup();
+
+        video.addEventListener('loadeddata', () => {
+          try {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            texture.needsUpdate = true;
+            resolve({ texture, play, stop, dispose, video });
+          } catch (err) {
+            reject(err);
+          }
+        }, { once: true });
+
+        video.addEventListener('error', () => {
+          dispose();
           reject(new Error('video_texture_failed'));
         }, { once: true });
 
-        try {
-          video.load();
-        } catch (_) {}
+        try { video.load(); } catch (_) {}
       });
     }
 
     const graph3dMediaTexturePromises = new Map();
-    const graph3dVideoTexturePromises = new Map();
 
     function getGraph3dMediaObject(node, cacheKey) {
       if (!window.THREE) return getGraph3dSphereObject(node, cacheKey);
@@ -3896,36 +3928,45 @@ async function initDocMenuTable() {
         spriteMaterial.needsUpdate = true;
       }
 
-      const promiseKey = node.path || node.id || Math.random().toString(36);
-      const texturePromise = node.type === 'video'
-        ? (() => {
-            if (!graph3dVideoTexturePromises.has(promiseKey)) {
-              graph3dVideoTexturePromises.set(promiseKey, loadVideoTexture(node).catch((err) => { throw err; }));
-            }
-            return graph3dVideoTexturePromises.get(promiseKey);
-          })()
-        : (() => {
-            if (!graph3dMediaTexturePromises.has(promiseKey)) {
-              graph3dMediaTexturePromises.set(promiseKey, loadImageTexture(node).catch((err) => { throw err; }));
-            }
-            return graph3dMediaTexturePromises.get(promiseKey);
-          })();
+      const resourceKey = node.path || node.id || Math.random().toString(36);
+      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey: node.type === 'video' ? resourceKey : null, controls: null });
+      if (node.type === 'video') {
+        if (!graph3dVideoResources.has(resourceKey)) {
+          graph3dVideoResources.set(resourceKey, loadVideoResource(node, resourceKey).catch((err) => { graph3dVideoResources.delete(resourceKey); throw err; }));
+        }
+        graph3dVideoResources.get(resourceKey)
+          .then((resource) => {
+            spriteMaterial.map = resource.texture;
+            spriteMaterial.color.set(0xffffff);
+            spriteMaterial.opacity = 1;
+            spriteMaterial.needsUpdate = true;
+            if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey, controls: resource });
+          })
+          .catch(() => {
+            spriteMaterial.map = createVideoPlaceholderTexture(node);
+            spriteMaterial.color.set(0xffffff);
+            spriteMaterial.opacity = 1;
+            spriteMaterial.needsUpdate = true;
+          });
+      } else {
+        if (!graph3dMediaTexturePromises.has(resourceKey)) {
+          graph3dMediaTexturePromises.set(resourceKey, loadImageTexture(node).catch((err) => { graph3dMediaTexturePromises.delete(resourceKey); throw err; }));
+        }
+        graph3dMediaTexturePromises.get(resourceKey)
+          .then((texture) => {
+            spriteMaterial.map = texture;
+            spriteMaterial.color.set(0xffffff);
+            spriteMaterial.opacity = 1;
+            spriteMaterial.needsUpdate = true;
+            if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey: null, controls: null });
+          })
+          .catch(() => {
+            spriteMaterial.color.set('#334155');
+            spriteMaterial.opacity = 0.85;
+          });
+        return group;
+      }
 
-      texturePromise
-        .then((texture) => {
-          spriteMaterial.map = texture;
-          spriteMaterial.color.set(0xffffff);
-          spriteMaterial.opacity = 1;
-          spriteMaterial.needsUpdate = true;
-        })
-        .catch(() => {
-          spriteMaterial.map = createVideoPlaceholderTexture(node);
-          spriteMaterial.color.set(0xffffff);
-          spriteMaterial.opacity = 1;
-          spriteMaterial.needsUpdate = true;
-        });
-
-      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, group);
       return group;
     }
 
@@ -3941,12 +3982,67 @@ async function initDocMenuTable() {
 
     function refreshGraph3dNodeObjects({ force = false } = {}) {
       if (!graph3dInstance || typeof graph3dInstance.nodeThreeObject !== 'function') return;
-      if (force) {
-        graph3dNodeObjectCache.clear();
+     if (force) {
+       stopGraph3dActiveVideo();
+       graph3dNodeObjectCache.forEach((entry) => {
+         if (entry && entry.controls && typeof entry.controls.stop === 'function') {
+           entry.controls.stop();
+          }
+          if (entry && entry.controls && typeof entry.controls.dispose === 'function') {
+            entry.controls.dispose();
+          }
+        });
+       graph3dNodeObjectCache.clear();
+        graph3dMediaTexturePromises.clear();
+        graph3dVideoResources.forEach((promise) => {
+          promise.then((resource) => {
+            if (resource && typeof resource.dispose === 'function') {
+              resource.dispose();
+            }
+          }).catch(() => {});
+        });
+        graph3dVideoResources.clear();
       }
       graph3dInstance.nodeThreeObject((node) => buildGraph3dNodeObject(node));
       if (typeof graph3dInstance.refresh === 'function') {
         graph3dInstance.refresh();
+      }
+    }
+
+    function stopGraph3dActiveVideo() {
+      if (!graph3dActiveVideoKey) return;
+      const cached = graph3dNodeObjectCache.get(graph3dActiveVideoKey);
+      if (cached && cached.controls && typeof cached.controls.stop === 'function') {
+        cached.controls.stop();
+      }
+      graph3dActiveVideoKey = null;
+    }
+
+    function startGraph3dVideoForNode(node) {
+      if (!node || node.type !== 'video') return;
+      const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
+      if (mode !== 'media') {
+        stopGraph3dActiveVideo();
+        return;
+      }
+      const cacheKey = node.id != null ? `${mode}:${node.id}` : null;
+      if (!cacheKey) return;
+      if (graph3dActiveVideoKey === cacheKey) return;
+      stopGraph3dActiveVideo();
+      const cached = graph3dNodeObjectCache.get(cacheKey);
+      if (cached && cached.controls && typeof cached.controls.play === 'function') {
+        cached.controls.play();
+        graph3dActiveVideoKey = cacheKey;
+      } else if (cached && cached.resourceKey && graph3dVideoResources.has(cached.resourceKey)) {
+        graph3dVideoResources.get(cached.resourceKey)
+          .then((resource) => {
+            if (resource && typeof resource.play === 'function') {
+              resource.play();
+              graph3dNodeObjectCache.set(cacheKey, { ...cached, controls: resource });
+              graph3dActiveVideoKey = cacheKey;
+            }
+          })
+          .catch(() => {});
       }
     }
 
@@ -4038,6 +4134,18 @@ async function initDocMenuTable() {
 
     function setupGraph3dScene(ForceGraphFactory, data) {
       if (!graph3dCanvasEl) return;
+      stopGraph3dActiveVideo();
+      graph3dVideoResources.forEach((promise) => {
+        promise.then((resource) => {
+          if (resource && typeof resource.dispose === 'function') {
+            resource.dispose();
+          } else if (resource && typeof resource.stop === 'function') {
+            resource.stop();
+          }
+        }).catch(() => {});
+      });
+      graph3dVideoResources.clear();
+      graph3dNodeObjectCache.clear();
       if (graph3dInstance && typeof graph3dInstance._destructor === 'function') {
         try { graph3dInstance._destructor(); } catch (_) {}
       }
@@ -4080,6 +4188,11 @@ async function initDocMenuTable() {
       Graph.onNodeHover(node => {
         if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
         graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+        if (node && node.type === 'video') {
+          startGraph3dVideoForNode(node);
+        } else {
+          stopGraph3dActiveVideo();
+        }
       });
       Graph.onNodeClick(node => {
         if (!node) return;
@@ -4120,6 +4233,7 @@ async function initDocMenuTable() {
           graph3dPinnedNode = null;
           applyGraph3dInfo(null);
           hideGraph3dContextMenu();
+          stopGraph3dActiveVideo();
         });
       }
 
@@ -4309,6 +4423,7 @@ async function initDocMenuTable() {
         try { graph3dResizeObserver.disconnect(); } catch (_) {}
         graph3dResizeObserver = null;
       }
+      if (next) stopGraph3dActiveVideo();
     }
 
     // グラフ3Dコンテキストメニューを作成
