@@ -1705,6 +1705,7 @@ async function initDocMenuTable() {
         matrixCollapsed: true,
         matrixSelection: null,
         graph3dCollapsed: true,
+        graph3dViewMode: 'media',
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
@@ -1746,6 +1747,10 @@ async function initDocMenuTable() {
       let graph3dResizeObserver = null;
       let bloomPassClass = null;
       let graph3dContextMenu = null;
+      let graph3dModeMediaEl = null;
+      let graph3dModeColorEl = null;
+      let graph3dSphereGeometry = null;
+      let graph3dNodeObjectCache = new Map();
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -3159,6 +3164,7 @@ async function initDocMenuTable() {
               urgency: state.matrixSelection.urgency
             } : null,
             graph3dCollapsed: !!state.graph3dCollapsed,
+            graph3dViewMode: state.graph3dViewMode,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3198,6 +3204,9 @@ async function initDocMenuTable() {
           }
           if (typeof saved.graph3dCollapsed === 'boolean') {
             state.graph3dCollapsed = saved.graph3dCollapsed;
+          }
+          if (typeof saved.graph3dViewMode === 'string') {
+            state.graph3dViewMode = normalizeGraph3dViewMode(saved.graph3dViewMode);
           }
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
@@ -3474,6 +3483,10 @@ async function initDocMenuTable() {
                 <h3 class="tb-3d-title">ノード情報</h3>
                 <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み">再読み込み</button>
               </div>
+              <div class="tb-3d-mode" role="group" aria-label="表示モード">
+                <button type="button" id="taskboard3dModeMedia" class="tb-3d-mode-btn is-active" data-mode="media">メディア</button>
+                <button type="button" id="taskboard3dModeColor" class="tb-3d-mode-btn" data-mode="color">カラー</button>
+              </div>
               <div class="tb-3d-base">ベースディレクトリ: <code id="taskboard3dBase">-</code></div>
               <dl class="tb-3d-meta">
                 <dt>名前</dt><dd id="taskboard3dNodeName">-</dd>
@@ -3545,6 +3558,8 @@ async function initDocMenuTable() {
     const graph3dBaseEl = panel.querySelector('#taskboard3dBase');
     const graph3dStatsEl = panel.querySelector('#taskboard3dStats');
     const graph3dReloadEl = panel.querySelector('#taskboard3dReload');
+    graph3dModeMediaEl = panel.querySelector('#taskboard3dModeMedia');
+    graph3dModeColorEl = panel.querySelector('#taskboard3dModeColor');
     const analyticsEl = panel.querySelector('.taskboard-analytics');
     const inputEl = panel.querySelector('#taskboardInput');
     const importanceEl = panel.querySelector('#taskboardImportance');
@@ -3634,9 +3649,9 @@ async function initDocMenuTable() {
         if (!bloomPassClass || !window.THREE) return;
         const renderer = graphInstance.renderer && graphInstance.renderer();
         const size = renderer?.getSize ? renderer.getSize(new window.THREE.Vector2()) : new window.THREE.Vector2(graph3dCanvasEl?.clientWidth || window.innerWidth, graph3dCanvasEl?.clientHeight || window.innerHeight);
-        const bloomPass = new bloomPassClass(size, 1.2, 0.6, 0.0);
-        bloomPass.strength = 1.45;
-        bloomPass.radius = 0.62;
+        const bloomPass = new bloomPassClass(size, 1.6, 0.85, 0.0);
+        bloomPass.strength = 1.78;
+        bloomPass.radius = 0.82;
         bloomPass.threshold = 0.0;
         composer.addPass(bloomPass);
         composer.__hasBloomPass = true;
@@ -3657,6 +3672,292 @@ async function initDocMenuTable() {
       if (mode === 'error') graph3dStatusEl.classList.add('is-error');
       else if (mode === 'loading') graph3dStatusEl.classList.add('is-loading');
       else if (mode === 'success') graph3dStatusEl.classList.add('is-success');
+    }
+
+    function normalizeGraph3dViewMode(value) {
+      return value === 'color' ? 'color' : 'media';
+    }
+
+    function updateGraph3dModeToggle() {
+      const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
+      if (graph3dModeMediaEl) {
+        graph3dModeMediaEl.classList.toggle('is-active', mode === 'media');
+        graph3dModeMediaEl.setAttribute('aria-pressed', mode === 'media' ? 'true' : 'false');
+      }
+      if (graph3dModeColorEl) {
+        graph3dModeColorEl.classList.toggle('is-active', mode === 'color');
+        graph3dModeColorEl.setAttribute('aria-pressed', mode === 'color' ? 'true' : 'false');
+      }
+    }
+
+    function buildGraph3dMediaUrl(node) {
+      const base = typeof state.backendBase === 'string' ? state.backendBase : '';
+      const normalizedBase = base.replace(/\/$/, '');
+      const rawPath = typeof node.path === 'string' ? node.path.replace(/^\/+/, '') : '';
+      if (!rawPath) return normalizedBase || '';
+      if (normalizedBase) {
+        return `${normalizedBase}/${encodeURI(rawPath)}`;
+      }
+      return `/${encodeURI(rawPath)}`;
+    }
+
+    function isGraph3dMediaNode(node) {
+      return !!(node && (node.type === 'image' || node.type === 'video'));
+    }
+
+    function getGraph3dSphereObject(node, cacheKey) {
+      if (!window.THREE) return null;
+      if (!graph3dSphereGeometry) {
+        graph3dSphereGeometry = new THREE.SphereGeometry(1, 36, 36);
+      }
+      if (cacheKey && graph3dNodeObjectCache.has(cacheKey)) {
+        return graph3dNodeObjectCache.get(cacheKey);
+      }
+      const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other);
+      const material = new THREE.MeshStandardMaterial({
+        color: baseColor.clone().lerp(new THREE.Color('#dbeafe'), 0.18),
+        emissive: baseColor.clone().multiplyScalar(0.45),
+        emissiveIntensity: 1.2,
+        metalness: 0.05,
+        roughness: 0.4,
+        transparent: true,
+        opacity: 0.94
+      });
+      const mesh = new THREE.Mesh(graph3dSphereGeometry, material);
+      const nodeSize = node.type === 'root' ? 18 : node.type === 'folder' ? 11 : 8;
+      mesh.scale.set(nodeSize, nodeSize, nodeSize);
+      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, mesh);
+      return mesh;
+    }
+
+    function createVideoPlaceholderTexture(node) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 480;
+      canvas.height = 320;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const gradient = ctx.createLinearGradient(0, 0, 0, 320);
+        gradient.addColorStop(0, '#0f172a');
+        gradient.addColorStop(1, '#1d4ed8');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 480, 320);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(0, 0, 480, 320);
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.beginPath();
+        ctx.moveTo(210, 160);
+        ctx.lineTo(210, 130);
+        ctx.lineTo(270, 160);
+        ctx.lineTo(210, 190);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(15,23,42,0.65)';
+        ctx.beginPath();
+        ctx.arc(240, 160, 58, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.beginPath();
+        ctx.moveTo(228, 160);
+        ctx.lineTo(228, 138);
+        ctx.lineTo(260, 160);
+        ctx.lineTo(228, 182);
+        ctx.closePath();
+        ctx.fill();
+        ctx.font = 'bold 28px "Inter", sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.fillText('VIDEO', 24, 44);
+      }
+      const texture = new THREE.Texture(canvas);
+      texture.needsUpdate = true;
+      texture.colorSpace = THREE.SRGBColorSpace || texture.colorSpace;
+      return texture;
+    }
+
+    function loadImageTexture(node) {
+      return new Promise((resolve, reject) => {
+        if (!window.THREE) {
+          reject(new Error('THREE unavailable'));
+          return;
+        }
+        const url = buildGraph3dMediaUrl(node);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          try {
+            const texture = new THREE.Texture(img);
+            texture.needsUpdate = true;
+            texture.colorSpace = THREE.SRGBColorSpace || texture.colorSpace;
+            resolve(texture);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        img.onerror = reject;
+        img.src = url;
+      });
+    }
+
+    function loadVideoTexture(node) {
+      return new Promise((resolve, reject) => {
+        if (!window.THREE) {
+          reject(new Error('THREE unavailable'));
+          return;
+        }
+        const url = buildGraph3dMediaUrl(node);
+        const video = document.createElement('video');
+        video.crossOrigin = 'anonymous';
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        video.src = url;
+
+        const cleanup = () => {
+          try { video.pause(); } catch (_) {}
+          video.removeAttribute('src');
+          video.load();
+        };
+
+        const handleLoaded = () => {
+          try {
+            const width = video.videoWidth || 640;
+            const height = video.videoHeight || 360;
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) throw new Error('canvas_context_unavailable');
+            ctx.drawImage(video, 0, 0, width, height);
+            const texture = new THREE.Texture(canvas);
+            texture.needsUpdate = true;
+            texture.colorSpace = THREE.SRGBColorSpace || texture.colorSpace;
+            resolve(texture);
+          } catch (err) {
+            reject(err);
+          } finally {
+            cleanup();
+          }
+        };
+
+        video.addEventListener('loadedmetadata', () => {
+          try {
+            const targetTime = Math.min(0.12, (video.duration || 0.12) - 0.01);
+            video.currentTime = Math.max(0, targetTime);
+          } catch (_) {}
+        }, { once: true });
+        video.addEventListener('loadeddata', handleLoaded, { once: true });
+        video.addEventListener('error', (event) => {
+          cleanup();
+          reject(new Error('video_texture_failed'));
+        }, { once: true });
+
+        try {
+          video.load();
+        } catch (_) {}
+      });
+    }
+
+    const graph3dMediaTexturePromises = new Map();
+    const graph3dVideoTexturePromises = new Map();
+
+    function getGraph3dMediaObject(node, cacheKey) {
+      if (!window.THREE) return getGraph3dSphereObject(node, cacheKey);
+      if (cacheKey && graph3dNodeObjectCache.has(cacheKey)) {
+        return graph3dNodeObjectCache.get(cacheKey);
+      }
+      const group = new THREE.Group();
+      const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.image);
+      const spriteMaterial = new THREE.SpriteMaterial({
+        color: baseColor.clone().lerp(new THREE.Color('#cbd5f5'), 0.4),
+        transparent: true,
+        opacity: 0.92,
+        toneMapped: false
+      });
+      const width = node.type === 'image' ? 26 : 24;
+      const height = width * (node.type === 'image' ? 0.68 : 0.62);
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(width, height, 1);
+      group.add(sprite);
+
+      const frameMaterial = new THREE.SpriteMaterial({
+        color: baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.55),
+        transparent: true,
+        opacity: 0.28,
+        toneMapped: false
+      });
+      const frame = new THREE.Sprite(frameMaterial);
+      frame.scale.set(width * 1.08, height * 1.08, 1);
+      frame.position.set(0, 0, -0.02);
+      group.add(frame);
+
+      if (node.type === 'video') {
+        spriteMaterial.map = createVideoPlaceholderTexture(node);
+        spriteMaterial.color.set(0xffffff);
+        spriteMaterial.opacity = 1;
+        spriteMaterial.needsUpdate = true;
+      }
+
+      const promiseKey = node.path || node.id || Math.random().toString(36);
+      const texturePromise = node.type === 'video'
+        ? (() => {
+            if (!graph3dVideoTexturePromises.has(promiseKey)) {
+              graph3dVideoTexturePromises.set(promiseKey, loadVideoTexture(node).catch((err) => { throw err; }));
+            }
+            return graph3dVideoTexturePromises.get(promiseKey);
+          })()
+        : (() => {
+            if (!graph3dMediaTexturePromises.has(promiseKey)) {
+              graph3dMediaTexturePromises.set(promiseKey, loadImageTexture(node).catch((err) => { throw err; }));
+            }
+            return graph3dMediaTexturePromises.get(promiseKey);
+          })();
+
+      texturePromise
+        .then((texture) => {
+          spriteMaterial.map = texture;
+          spriteMaterial.color.set(0xffffff);
+          spriteMaterial.opacity = 1;
+          spriteMaterial.needsUpdate = true;
+        })
+        .catch(() => {
+          spriteMaterial.map = createVideoPlaceholderTexture(node);
+          spriteMaterial.color.set(0xffffff);
+          spriteMaterial.opacity = 1;
+          spriteMaterial.needsUpdate = true;
+        });
+
+      if (cacheKey) graph3dNodeObjectCache.set(cacheKey, group);
+      return group;
+    }
+
+    function buildGraph3dNodeObject(node) {
+      if (!node) return null;
+      const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
+      const cacheKey = node && node.id != null ? `${mode}:${node.id}` : null;
+      if (mode === 'media' && isGraph3dMediaNode(node)) {
+        return getGraph3dMediaObject(node, cacheKey);
+      }
+      return getGraph3dSphereObject(node, cacheKey);
+    }
+
+    function refreshGraph3dNodeObjects({ force = false } = {}) {
+      if (!graph3dInstance || typeof graph3dInstance.nodeThreeObject !== 'function') return;
+      if (force) {
+        graph3dNodeObjectCache.clear();
+      }
+      graph3dInstance.nodeThreeObject((node) => buildGraph3dNodeObject(node));
+      if (typeof graph3dInstance.refresh === 'function') {
+        graph3dInstance.refresh();
+      }
+    }
+
+    function setGraph3dViewMode(nextMode) {
+      const normalized = normalizeGraph3dViewMode(nextMode);
+      if (state.graph3dViewMode === normalized) return;
+      state.graph3dViewMode = normalized;
+      updateGraph3dModeToggle();
+      refreshGraph3dNodeObjects({ force: true });
+      schedulePersist();
+      hideGraph3dContextMenu();
     }
 
     function resetGraph3dInfo() {
@@ -3751,6 +4052,7 @@ async function initDocMenuTable() {
       if (typeof graphInitializer !== 'function') return;
       const Graph = graphInitializer(container);
       if (!Graph) return;
+      graph3dInstance = Graph;
       try {
         if (graph3dResizeObserver && typeof graph3dResizeObserver.disconnect === 'function') {
           graph3dResizeObserver.disconnect();
@@ -3768,12 +4070,12 @@ async function initDocMenuTable() {
           if (node.type === 'image') return 8;
           return 6;
         })
-        .linkOpacity(0.82)
-        .linkWidth(() => 2.8)
-        .linkColor(() => 'rgba(180, 206, 255, 0.88)')
-        .linkDirectionalParticles(8)
-        .linkDirectionalParticleSpeed(0.011)
-        .linkDirectionalParticleWidth(2.2);
+        .linkOpacity(0.9)
+        .linkWidth(() => 3.2)
+        .linkColor(() => 'rgba(210, 230, 255, 0.92)')
+        .linkDirectionalParticles(9)
+        .linkDirectionalParticleSpeed(0.0085)
+        .linkDirectionalParticleWidth(2.5);
 
       Graph.onNodeHover(node => {
         if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
@@ -3821,32 +4123,16 @@ async function initDocMenuTable() {
         });
       }
 
-      const glowCache = new Map();
-      let sphereGeometry = null;
-      if (Graph.nodeThreeObject && typeof THREE !== 'undefined') {
-        Graph.nodeThreeObjectExtend(false);
-        sphereGeometry = new THREE.SphereGeometry(1, 36, 36);
-        Graph.nodeThreeObject((node) => {
-          if (!THREE) return null;
-          if (!glowCache.has(node.id)) {
-            const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other);
-            const material = new THREE.MeshStandardMaterial({
-              color: baseColor.clone().lerp(new THREE.Color('#dfe8ff'), 0.2),
-              emissive: baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.4),
-              emissiveIntensity: 0.9,
-              metalness: 0.05,
-              roughness: 0.45,
-              transparent: true,
-              opacity: 0.92
-            });
-            const mesh = new THREE.Mesh(sphereGeometry, material);
-            const nodeSize = node.type === 'root' ? 18 : node.type === 'folder' ? 11 : 8;
-            mesh.scale.set(nodeSize, nodeSize, nodeSize);
-            glowCache.set(node.id, mesh);
-          }
-          return glowCache.get(node.id);
-        });
+      if (typeof Graph.nodeThreeObjectExtend === 'function') {
+        try { Graph.nodeThreeObjectExtend(false); } catch (_) {}
       }
+      if (window.THREE) {
+        graph3dSphereGeometry = new THREE.SphereGeometry(1, 36, 36);
+      } else {
+        graph3dSphereGeometry = null;
+      }
+      graph3dMediaTexturePromises.clear();
+      refreshGraph3dNodeObjects({ force: true });
 
       try {
         Graph.d3Force('link').distance(48);
@@ -3895,7 +4181,6 @@ async function initDocMenuTable() {
       };
 
       try {
-        graph3dInstance = Graph;
         applyGraphDimensions(graph3dCanvasEl.clientWidth, graph3dCanvasEl.clientHeight, false);
         if (typeof Graph.postProcessing === 'function') {
           Graph.postProcessing(true);
@@ -3907,7 +4192,7 @@ async function initDocMenuTable() {
         if (Graph.renderer && typeof Graph.renderer === 'function') {
           const renderer = Graph.renderer();
           if (renderer) {
-            renderer.toneMappingExposure = 1.1;
+            renderer.toneMappingExposure = 1.25;
           }
         }
         attemptFit(400);
@@ -3999,6 +4284,7 @@ async function initDocMenuTable() {
 
     function renderGraph3dPanel() {
       updateGraph3dToggleLabel();
+      updateGraph3dModeToggle();
       updateViewMode();
       if (state.graph3dCollapsed) {
         graph3dSetStatus('', 'info');
@@ -4468,6 +4754,19 @@ async function initDocMenuTable() {
         ensureGraph3dInitialized({ forceReload: true }).catch(() => {});
       });
     }
+    if (graph3dModeMediaEl) {
+      graph3dModeMediaEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        setGraph3dViewMode('media');
+      });
+    }
+    if (graph3dModeColorEl) {
+      graph3dModeColorEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        setGraph3dViewMode('color');
+      });
+    }
+    updateGraph3dModeToggle();
     updateViewMode();
     if (matrixEl && !matrixEl.dataset.bound) {
       matrixEl.dataset.bound = '1';
