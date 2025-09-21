@@ -1744,6 +1744,8 @@ async function initDocMenuTable() {
       let graph3dLoadPromise = null;
       let graph3dCanvasContainer = null;
       let graph3dResizeObserver = null;
+      let bloomPassClass = null;
+      let graph3dContextMenu = null;
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -3450,9 +3452,9 @@ async function initDocMenuTable() {
         <div class="tb-title">エージェントタスク</div>
         <div class="tb-sync-status info" id="taskboardSyncStatus" aria-live="polite" aria-hidden="true"></div>
         <div class="tb-header-toggles">
-          <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="4" height="4" rx="1"></rect><rect x="7" y="2" width="4" height="4" rx="1"></rect><rect x="12" y="2" width="2" height="4" rx="1"></rect><rect x="2" y="7" width="4" height="4" rx="1"></rect><rect x="7" y="7" width="4" height="4" rx="1"></rect><rect x="12" y="7" width="2" height="4" rx="1"></rect><rect x="2" y="12" width="4" height="2" rx="1"></rect><rect x="7" y="12" width="4" height="2" rx="1"></rect><rect x="12" y="12" width="2" height="2" rx="1"></rect></svg></span><span class="tb-toggle-label">ヒートマップ</span></button>
-          <button type="button" id="taskboardMatrixToggle" class="tb-matrix-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="9" width="5.5" height="5.5" rx="1"></rect></svg></span><span class="tb-toggle-label">マトリクス</span></button>
-          <button type="button" id="taskboard3dToggle" class="tb-3d-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1.1 2 4v8l5.5 2.9L13 12V4L7.5 1.1Zm0 1.8 3.8 2L7.5 7 3.7 4.9l3.8-2Zm-4 2.9L7 8.7v4L3.5 11V5.8Zm5.5 6.9v-4l3.5-1.8V11l-3.5 1.7Z"/></svg></span><span class="tb-toggle-label">3Dシステム</span></button>
+          <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false" aria-label="ヒートマップ" title="ヒートマップ"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="2.5" width="5" height="5" rx="1.4"></rect><rect x="8.5" y="2.5" width="5" height="5" rx="1.4"></rect><rect x="14.5" y="2.5" width="3" height="5" rx="1.4"></rect><rect x="2.5" y="8.5" width="5" height="5" rx="1.4"></rect><rect x="8.5" y="8.5" width="5" height="5" rx="1.4"></rect><rect x="14.5" y="8.5" width="3" height="5" rx="1.4"></rect><rect x="2.5" y="14.5" width="5" height="3" rx="1.4"></rect><rect x="8.5" y="14.5" width="5" height="3" rx="1.4"></rect><rect x="14.5" y="14.5" width="3" height="3" rx="1.4"></rect></svg></span><span class="tb-toggle-label">ヒートマップ</span></button>
+          <button type="button" id="taskboardMatrixToggle" class="tb-matrix-toggle" aria-expanded="false" aria-label="マトリクス" title="マトリクス"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.8" y="2.8" width="6.4" height="6.4" rx="1.8"></rect><rect x="10.8" y="2.8" width="6.4" height="6.4" rx="1.8"></rect><rect x="2.8" y="10.8" width="6.4" height="6.4" rx="1.8"></rect><rect x="10.8" y="10.8" width="6.4" height="6.4" rx="1.8"></rect></svg></span><span class="tb-toggle-label">マトリクス</span></button>
+          <button type="button" id="taskboard3dToggle" class="tb-3d-toggle" aria-expanded="false" aria-label="3Dシステム" title="3Dシステム"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2.4 4 5.2v6.4L10 14.4l6-2.8V5.2L10 2.4Z" fill="currentColor" opacity="0.14"></path><path d="M10 2.4 4 5.2v6.4L10 14.4l6-2.8V5.2L10 2.4Zm0 0v12M4 5.2l6 2.8m6-2.8-6 2.8"/></svg></span><span class="tb-toggle-label">3Dシステム</span></button>
         </div>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
@@ -3616,6 +3618,33 @@ async function initDocMenuTable() {
       return loadExternalScriptOnce('//cdn.jsdelivr.net/npm/3d-force-graph', () => window.ForceGraph3D);
     }
 
+    async function ensureBloomPass(graphInstance) {
+      if (!graphInstance || typeof graphInstance.postProcessingComposer !== 'function') return;
+      try {
+        if (typeof graphInstance.postProcessing === 'function') {
+          graphInstance.postProcessing(true);
+        }
+        const composer = graphInstance.postProcessingComposer();
+        if (!composer || composer.__hasBloomPass) return;
+        await ensureThreeLibrary();
+        if (!bloomPassClass) {
+          const mod = await import('https://esm.sh/three/examples/jsm/postprocessing/UnrealBloomPass.js?external=three');
+          bloomPassClass = mod?.UnrealBloomPass || mod?.default || null;
+        }
+        if (!bloomPassClass || !window.THREE) return;
+        const renderer = graphInstance.renderer && graphInstance.renderer();
+        const size = renderer?.getSize ? renderer.getSize(new window.THREE.Vector2()) : new window.THREE.Vector2(graph3dCanvasEl?.clientWidth || window.innerWidth, graph3dCanvasEl?.clientHeight || window.innerHeight);
+        const bloomPass = new bloomPassClass(size, 1.2, 0.6, 0.0);
+        bloomPass.strength = 1.45;
+        bloomPass.radius = 0.62;
+        bloomPass.threshold = 0.0;
+        composer.addPass(bloomPass);
+        composer.__hasBloomPass = true;
+      } catch (error) {
+        console.warn('[Taskboard][3D] bloom setup failed', error);
+      }
+    }
+
     function graph3dSetStatus(message, mode = 'info') {
       if (!graph3dStatusEl) return;
       const text = typeof message === 'string' ? message : '';
@@ -3739,9 +3768,12 @@ async function initDocMenuTable() {
           if (node.type === 'image') return 8;
           return 6;
         })
-        .linkOpacity(0.16)
-        .linkWidth(0.6)
-        .linkDirectionalParticles(0);
+        .linkOpacity(0.82)
+        .linkWidth(() => 2.8)
+        .linkColor(() => 'rgba(180, 206, 255, 0.88)')
+        .linkDirectionalParticles(8)
+        .linkDirectionalParticleSpeed(0.011)
+        .linkDirectionalParticleWidth(2.2);
 
       Graph.onNodeHover(node => {
         if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
@@ -3767,10 +3799,52 @@ async function initDocMenuTable() {
         Graph.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, node, 600);
       });
 
+      // ノードの右クリックイベントを追加
+      Graph.onNodeRightClick((node, event) => {
+        if (!node || !node.name) return;
+        // イベントオブジェクトが渡されない場合は、最後のマウスイベントを使用
+        const mouseEvent = event || window.event || { clientX: 0, clientY: 0 };
+        
+        // デフォルトのコンテキストメニューを防ぐ
+        if (mouseEvent && mouseEvent.preventDefault) {
+          mouseEvent.preventDefault();
+        }
+        
+        showGraph3dContextMenu(node, mouseEvent);
+      });
+
       if (typeof Graph.onBackgroundClick === 'function') {
         Graph.onBackgroundClick(() => {
           graph3dPinnedNode = null;
           applyGraph3dInfo(null);
+          hideGraph3dContextMenu();
+        });
+      }
+
+      const glowCache = new Map();
+      let sphereGeometry = null;
+      if (Graph.nodeThreeObject && typeof THREE !== 'undefined') {
+        Graph.nodeThreeObjectExtend(false);
+        sphereGeometry = new THREE.SphereGeometry(1, 36, 36);
+        Graph.nodeThreeObject((node) => {
+          if (!THREE) return null;
+          if (!glowCache.has(node.id)) {
+            const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other);
+            const material = new THREE.MeshStandardMaterial({
+              color: baseColor.clone().lerp(new THREE.Color('#dfe8ff'), 0.2),
+              emissive: baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.4),
+              emissiveIntensity: 0.9,
+              metalness: 0.05,
+              roughness: 0.45,
+              transparent: true,
+              opacity: 0.92
+            });
+            const mesh = new THREE.Mesh(sphereGeometry, material);
+            const nodeSize = node.type === 'root' ? 18 : node.type === 'folder' ? 11 : 8;
+            mesh.scale.set(nodeSize, nodeSize, nodeSize);
+            glowCache.set(node.id, mesh);
+          }
+          return glowCache.get(node.id);
         });
       }
 
@@ -3823,8 +3897,18 @@ async function initDocMenuTable() {
       try {
         graph3dInstance = Graph;
         applyGraphDimensions(graph3dCanvasEl.clientWidth, graph3dCanvasEl.clientHeight, false);
+        if (typeof Graph.postProcessing === 'function') {
+          Graph.postProcessing(true);
+        }
         if (typeof Graph.refresh === 'function') {
           Graph.refresh();
+        }
+        ensureBloomPass(Graph).catch(() => {});
+        if (Graph.renderer && typeof Graph.renderer === 'function') {
+          const renderer = Graph.renderer();
+          if (renderer) {
+            renderer.toneMappingExposure = 1.1;
+          }
         }
         attemptFit(400);
         if (typeof Graph.onEngineStop === 'function') {
@@ -3939,6 +4023,160 @@ async function initDocMenuTable() {
         try { graph3dResizeObserver.disconnect(); } catch (_) {}
         graph3dResizeObserver = null;
       }
+    }
+
+    // グラフ3Dコンテキストメニューを作成
+    function ensureGraph3dContextMenu() {
+      if (graph3dContextMenu) return graph3dContextMenu;
+      
+      graph3dContextMenu = document.createElement('div');
+      graph3dContextMenu.className = 'taskboard-context-menu graph3d-context-menu';
+      graph3dContextMenu.innerHTML = `
+        <button type="button" class="tb-context-item" data-action="copy-path">
+          <span>ファイルパスをコピー</span>
+        </button>
+        <button type="button" class="tb-context-item" data-action="copy-name">
+          <span>ファイル名をコピー</span>
+        </button>
+      `;
+      document.body.appendChild(graph3dContextMenu);
+
+      graph3dContextMenu.addEventListener('click', async (evt) => {
+        const button = evt.target.closest('.tb-context-item');
+        if (!button) return;
+        
+        const action = button.dataset.action;
+        const node = graph3dContextMenu._targetNode;
+        
+        if (!node || !node.name) return;
+        
+        try {
+          if (action === 'copy-path') {
+            await copyTextToClipboard(node.name);
+            hideGraph3dContextMenu();
+            showCopyNotification('ファイルパスをコピーしました');
+          } else if (action === 'copy-name') {
+            const fileName = node.name.split('/').pop() || node.name;
+            await copyTextToClipboard(fileName);
+            hideGraph3dContextMenu();
+            showCopyNotification('ファイル名をコピーしました');
+          }
+        } catch (err) {
+          console.error('コピーに失敗しました:', err);
+          showCopyNotification('コピーに失敗しました', 'error');
+        }
+      });
+
+      // グローバルクリックで閉じる
+      const onGlobalClick = (evt) => {
+        if (!graph3dContextMenu.contains(evt.target)) {
+          hideGraph3dContextMenu();
+        }
+      };
+      
+      // ESCキーで閉じる
+      const onGlobalKeydown = (evt) => {
+        if (evt.key === 'Escape') {
+          hideGraph3dContextMenu();
+        }
+      };
+
+      // イベントリスナーを保存
+      graph3dContextMenu._globalClickHandler = onGlobalClick;
+      graph3dContextMenu._globalKeydownHandler = onGlobalKeydown;
+
+      return graph3dContextMenu;
+    }
+
+    // グラフ3Dコンテキストメニューを表示
+    function showGraph3dContextMenu(node, event) {
+      if (!node || !event) return;
+      
+      const menu = ensureGraph3dContextMenu();
+      menu._targetNode = node;
+      
+      // マウス位置を取得
+      const x = event.clientX || event.pageX || 0;
+      const y = event.clientY || event.pageY || 0;
+      
+      // メニューを表示
+      menu.classList.add('is-visible');
+      
+      // 位置を設定（画面外に出ないように調整）
+      setTimeout(() => {
+        const rect = menu.getBoundingClientRect();
+        const viewWidth = window.innerWidth;
+        const viewHeight = window.innerHeight;
+        
+        let left = x;
+        let top = y;
+        
+        if (left + rect.width > viewWidth) {
+          left = viewWidth - rect.width - 10;
+        }
+        if (top + rect.height > viewHeight) {
+          top = viewHeight - rect.height - 10;
+        }
+        
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+      }, 0);
+
+      // グローバルイベントリスナーを追加
+      document.addEventListener('click', menu._globalClickHandler);
+      document.addEventListener('keydown', menu._globalKeydownHandler);
+    }
+
+    // グラフ3Dコンテキストメニューを非表示
+    function hideGraph3dContextMenu() {
+      if (graph3dContextMenu) {
+        graph3dContextMenu.classList.remove('is-visible');
+        graph3dContextMenu._targetNode = null;
+        
+        // グローバルイベントリスナーを削除
+        if (graph3dContextMenu._globalClickHandler) {
+          document.removeEventListener('click', graph3dContextMenu._globalClickHandler);
+        }
+        if (graph3dContextMenu._globalKeydownHandler) {
+          document.removeEventListener('keydown', graph3dContextMenu._globalKeydownHandler);
+        }
+      }
+    }
+
+    // コピー通知を表示
+    function showCopyNotification(message, type = 'success') {
+      // 既存の通知を削除
+      const existingNotification = document.querySelector('.copy-notification');
+      if (existingNotification) {
+        existingNotification.remove();
+      }
+
+      // 新しい通知を作成
+      const notification = document.createElement('div');
+      notification.className = `copy-notification copy-notification--${type}`;
+      notification.textContent = message;
+      notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: ${type === 'error' ? 'rgba(239, 68, 68, 0.9)' : 'rgba(34, 197, 94, 0.9)'};
+        color: white;
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        z-index: 100000;
+        pointer-events: none;
+        animation: slideIn 0.3s ease;
+      `;
+      document.body.appendChild(notification);
+
+      // 2秒後に削除
+      setTimeout(() => {
+        notification.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => notification.remove(), 300);
+      }, 2000);
     }
     updateSyncStatusFromState('info');
     updateModelBadge();

@@ -343,6 +343,11 @@ pre.code code { color: var(--text); }
 .inspect-tip .t-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .inspect-active { cursor: crosshair !important; }
 
+/* グラフ3D用コンテキストメニュー */
+.graph3d-context-menu {
+  min-width: 180px;
+}
+
 /* モバイル最適化 */
 /* デザイン要件定義用スタイル */
 .color-palette { margin: 20px 0; }
@@ -1267,19 +1272,26 @@ pre.code code { color: var(--text); }
 .tb-heatmap-toggle,
 .tb-matrix-toggle,
 .tb-3d-toggle {
-  padding: 6px 12px;
-  font-size: 0.75rem;
-  border-radius: 999px;
+  padding: 10px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
   border: 1px solid rgba(148, 163, 184, 0.45);
   background: rgba(148, 163, 184, 0.12);
   color: var(--text);
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease;
-  min-width: 88px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.12);
+  position: relative;
+  line-height: 0;
+}
+.tb-header-toggles {
+  display: flex;
+  gap: 8px;
 }
 .taskboard-header .tb-heatmap-toggle,
 .taskboard-header .tb-matrix-toggle,
@@ -1296,6 +1308,7 @@ pre.code code { color: var(--text); }
 .tb-3d-toggle.is-active {
   background: rgba(59, 130, 246, 0.22);
   border-color: rgba(59, 130, 246, 0.45);
+  box-shadow: 0 0 18px rgba(59, 130, 246, 0.35);
 }
 .tb-heatmap-toggle:active,
 .tb-matrix-toggle:active,
@@ -1318,8 +1331,8 @@ pre.code code { color: var(--text); }
 }
 .tb-toggle-icon {
   display: inline-flex;
-  width: 0.95rem;
-  height: 0.95rem;
+  width: 1.35rem;
+  height: 1.35rem;
   color: currentColor;
 }
 .tb-toggle-icon svg {
@@ -1329,8 +1342,15 @@ pre.code code { color: var(--text); }
   fill: currentColor;
 }
 .tb-toggle-label {
-  display: inline-block;
-  line-height: 1.1;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .tb-heatmap-legend {
