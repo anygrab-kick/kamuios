@@ -1079,10 +1079,64 @@ pre.code code { color: var(--text); }
   gap: 8px;
 }
 
+.task-title-row[data-action="open"] {
+  cursor: pointer;
+}
+
+.task-title-row[data-action="open"] .task-title-text {
+  cursor: pointer;
+}
+
 .task-title-text {
+  display: block;
   flex: 1;
   min-width: 0;
+  max-width: 100%;
   word-break: break-word;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-item.is-expanded .task-title-text {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: initial;
+}
+
+.task-details {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-detail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.task-detail-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--text) 80%, rgba(148, 163, 184, 0.25));
+}
+
+.task-detail-body {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.task-detail-body code {
+  font-family: 'SFMono-Regular', 'Consolas', 'Menlo', monospace;
+  font-size: 0.8rem;
 }
 
 .tb-model-pill {

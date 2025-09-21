@@ -1591,6 +1591,7 @@ async function initDocMenuTable() {
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
+      const CODEX_IDLE_STOP_THRESHOLD = 3; // consecutive idle polls before stopping Codex monitor
       const MODEL_BLUEPRINTS = [
         {
           id: 'claude',
@@ -1635,7 +1636,8 @@ async function initDocMenuTable() {
         modelOptions: MODEL_BLUEPRINTS.map(opt => ({ ...opt })),
         activeModelId: MODEL_BLUEPRINTS[0]?.id || null,
         heatmapCollapsed: true,
-        heatmapSelection: null
+        heatmapSelection: null,
+        expandedTaskIds: new Set()
       };
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
@@ -2617,6 +2619,33 @@ async function initDocMenuTable() {
         return '';
       }
 
+      function expansionKeyForTask(task){
+        const key = taskCacheKey(task);
+        if (key) return key;
+        if (task && task.id != null) return String(task.id);
+        return '';
+      }
+
+      function computePromptPreview(text, limit = 12){
+        if (!text) return '';
+        const lines = String(text).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        const first = lines.length ? lines[0] : String(text).trim();
+        if (!first) return '';
+        if (first.length <= limit) return first;
+        const safeLimit = Math.max(0, limit - 1);
+        return `${first.slice(0, safeLimit)}…`;
+      }
+
+      function getPromptPreview(task, limit = 12){
+        if (!task) return '';
+        const effectiveLimit = Number.isFinite(limit) ? Math.max(1, limit) : 12;
+        const raw = typeof task.promptPreview === 'string' ? task.promptPreview.trim() : '';
+        if (raw) {
+          return raw.length > effectiveLimit ? computePromptPreview(raw, effectiveLimit) : raw;
+        }
+        return computePromptPreview(task.prompt || '', effectiveLimit);
+      }
+
       function cloneTaskForStorage(task){
         if (!task || task.id == null) return null;
         const rawLogs = Array.isArray(task.logs)
@@ -2651,6 +2680,9 @@ async function initDocMenuTable() {
             : null,
           completionSummaryPending: task.completionSummaryPending ? true : false,
           completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : '',
+          codexPollingDisabled: task.codexPollingDisabled ? true : false,
+          codexIdleChecks: Number.isFinite(task.codexIdleChecks) ? Math.max(0, Math.floor(task.codexIdleChecks)) : 0,
+          codexHasSeenWorking: task.codexHasSeenWorking ? true : false,
           logs
         };
       }
@@ -2681,6 +2713,9 @@ async function initDocMenuTable() {
             : null,
           completionSummaryPending: !!record.completionSummaryPending,
           completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
+          codexPollingDisabled: !!record.codexPollingDisabled,
+          codexIdleChecks: Number.isFinite(record.codexIdleChecks) ? record.codexIdleChecks : 0,
+          codexHasSeenWorking: !!record.codexHasSeenWorking,
           logs: Array.isArray(record.logs)
             ? record.logs.map(log => {
                 const text = String(log);
@@ -2701,9 +2736,15 @@ async function initDocMenuTable() {
         });
         state.tasks = filtered.slice(0, MAX_TASK_HISTORY);
         const keepKeys = new Set(state.tasks.map(taskCacheKey).filter(Boolean));
+        const expansionKeep = new Set(state.tasks.map(expansionKeyForTask).filter(Boolean));
         Object.keys(taskLogsCache).forEach(key => {
           if (!keepKeys.has(key)) delete taskLogsCache[key];
         });
+        if (state.expandedTaskIds && state.expandedTaskIds.size) {
+          for (const key of Array.from(state.expandedTaskIds)) {
+            if (!expansionKeep.has(key)) state.expandedTaskIds.delete(key);
+          }
+        }
       }
 
       function persistNow(){
@@ -2766,6 +2807,7 @@ async function initDocMenuTable() {
                 return bTime - aTime;
               });
               state.tasks = revived.slice(0, MAX_TASK_HISTORY);
+              state.tasks.forEach(ensureCodexMonitorState);
             }
           }
           if (saved.logs && typeof saved.logs === 'object') {
@@ -3640,6 +3682,7 @@ async function initDocMenuTable() {
       if (s === 'external') return 'doing';
       if (s === 'codex-working') return 'working'; // Codex実行中用のステータス
       if (s === 'codex-waiting') return 'waiting'; // Codex待機中用のステータス
+      if (s === 'codex-idle') return 'idle'; // Codex監視停止用のステータス
       return 'todo';
     }
     function iconFor(s){
@@ -3649,6 +3692,7 @@ async function initDocMenuTable() {
       if (s === 'external') return '🖥';
       if (s === 'codex-working') return '🛠️'; // Codex実行中用のアイコン
       if (s === 'codex-waiting') return '⏸️'; // Codex待機中用のアイコン
+      if (s === 'codex-idle') return '💤'; // Codex監視停止のアイコン
       return '';
     }
 
@@ -3669,6 +3713,12 @@ async function initDocMenuTable() {
       } catch (_) {
         return date.toISOString();
       }
+    }
+    function ensureCodexMonitorState(task){
+      if (!task || typeof task !== 'object') return;
+      if (typeof task.codexPollingDisabled !== 'boolean') task.codexPollingDisabled = false;
+      if (typeof task.codexIdleChecks !== 'number' || !Number.isFinite(task.codexIdleChecks)) task.codexIdleChecks = 0;
+      if (typeof task.codexHasSeenWorking !== 'boolean') task.codexHasSeenWorking = false;
     }
     function mergeTask(task){
       if (task && typeof task === 'object') {
@@ -3695,6 +3745,7 @@ async function initDocMenuTable() {
         if (typeof task.completionSummary !== 'string') {
           state.tasks[idx].completionSummary = typeof existing.completionSummary === 'string' ? existing.completionSummary : '';
         }
+        ensureCodexMonitorState(state.tasks[idx]);
       } else {
         if (typeof task.manualDone !== 'boolean') {
           task.manualDone = false;
@@ -3702,6 +3753,7 @@ async function initDocMenuTable() {
         if (typeof task.completionSummary !== 'string') {
           task.completionSummary = '';
         }
+        ensureCodexMonitorState(task);
         state.tasks.unshift(task);
       }
       state.tasks.sort((a,b)=>new Date(b.createdAt||0) - new Date(a.createdAt||0));
@@ -3868,6 +3920,30 @@ async function initDocMenuTable() {
       render();
     }
 
+    function isTaskExpanded(task){
+      if (!task) return false;
+      const key = expansionKeyForTask(task);
+      if (!key) return false;
+      return state.expandedTaskIds ? state.expandedTaskIds.has(key) : false;
+    }
+
+    function setTaskExpanded(task, expanded){
+      if (!task) return;
+      const key = expansionKeyForTask(task);
+      if (!key) return;
+      if (!state.expandedTaskIds) state.expandedTaskIds = new Set();
+      if (expanded) state.expandedTaskIds.add(key);
+      else state.expandedTaskIds.delete(key);
+      schedulePersist();
+    }
+
+    function toggleTaskExpansion(task){
+      if (!task) return;
+      const next = !isTaskExpanded(task);
+      setTaskExpanded(task, next);
+      render();
+    }
+
     function render(){
       if (!listEl) return;
       if (!Array.isArray(state.tasks) || state.tasks.length === 0){
@@ -3913,23 +3989,37 @@ async function initDocMenuTable() {
         const activeTerminal = (!manualDone && t && t.externalTerminal && t.externalTerminal.sessionId) ? t.externalTerminal : null;
         const isExternal = !!activeTerminal;
         const isCodex = activeTerminal && activeTerminal.command && activeTerminal.command.toLowerCase().includes('codex');
+        const codexMonitorStopped = isCodex && !!t.codexPollingDisabled;
         const responseText = String(t.response || '');
         let s = t && typeof t.status === 'string' && t.status ? t.status : (isExternal ? 'external' : 'running');
         
         // Codexの場合のステータス判定を詳細化
         if (isCodex && (s === 'external' || s === 'running')) {
-          // codexIsWorkingプロパティまたはレスポンステキストをチェック
-          const isActuallyWorking = t.codexIsWorking || (responseText && responseText.toLowerCase().includes('working'));
-          s = isActuallyWorking ? 'codex-working' : 'codex-waiting';
+          if (codexMonitorStopped) {
+            s = 'codex-idle';
+          } else {
+            // codexIsWorkingプロパティまたはレスポンステキストをチェック
+            const isActuallyWorking = t.codexIsWorking || (responseText && responseText.toLowerCase().includes('working'));
+            s = isActuallyWorking ? 'codex-working' : 'codex-waiting';
+          }
         }
         
         const cls = cssStatus(s);
         const icon = manualDone ? '✅' : iconFor(s);
-        const title = escapeHtml(t.prompt || '');
+        const summaryPending = !!(t && t.completionSummaryPending);
+        const isExpanded = isTaskExpanded(t);
+        const promptPreview = getPromptPreview(t);
+        const rawPrompt = typeof t.prompt === 'string' ? t.prompt : '';
+        const effectivePreview = promptPreview || rawPrompt;
+        const titleSource = isExpanded ? (rawPrompt || effectivePreview) : effectivePreview;
+        const titleHtml = isExpanded
+          ? escapeHtml(titleSource).replace(/\r?\n/g, '<br>')
+          : escapeHtml(titleSource);
+        const titleAttr = escapeAttr(rawPrompt || effectivePreview);
+        const toggleTitle = isExpanded ? '詳細を閉じる' : '詳細を表示';
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
         const items = [];
-        const summaryPending = !!(t && t.completionSummaryPending);
 
         if (isExternal && activeTerminal && activeTerminal.sessionId) {
           const terminalLabel = activeTerminal.app ? String(activeTerminal.app) : 'ターミナル';
@@ -3939,6 +4029,13 @@ async function initDocMenuTable() {
           items.push(`<span class="tb-meta-item" data-action="focus-terminal" data-session="${sessionIdAttr}" title="${escapeHtml(terminalTitle)}" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(148, 163, 184, 0.18);transition:background 0.2s;">
             <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#38bdf8;"><path fill="currentColor" d="M4 5a2 2 0 0 0-2 2v9c0 1.105.895 2 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H4Zm0 2h16v9H4V7Zm2 2v2h6V9H6Zm0 4v2h4v-2H6Z"/></svg>
             <span>${escapeHtml(buttonLabel)}</span>
+          </span>`);
+        }
+
+        if (isCodex && codexMonitorStopped && !manualDone) {
+          items.push(`<span class="tb-meta-item" data-action="resume-codex-monitor" title="Codexセッションの監視を再開" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px;border-radius:4px;background:rgba(59,130,246,0.12);transition:background 0.2s;">
+            <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#60a5fa;"><path fill="currentColor" d="M12 5a7 7 0 1 1-6.32 4H3l3.89-4.26L10.77 9H7.61a5 5 0 1 0 4.39-2.5V5Z"/></svg>
+            <span>監視再開</span>
           </span>`);
         }
 
@@ -3972,26 +4069,31 @@ async function initDocMenuTable() {
                   ? '仕事中'
                   : (s === 'codex-waiting')
                       ? '待機中'
-                      : '未完了';
+                      : (s === 'codex-idle')
+                          ? '監視停止'
+                          : '未完了';
         const manualToggleClasses = `tb-done-toggle${manualDone ? ' is-active' : ''}${summaryPending ? ' is-loading' : ''}`;
         const manualToggleBusyAttrs = summaryPending ? ' aria-busy="true" disabled' : '';
         const manualToggle = `<button type="button" class="${manualToggleClasses}" data-action="toggle-done" aria-pressed="${manualDone ? 'true' : 'false'}" title="${escapeHtml(manualToggleLabel)}"${manualToggleBusyAttrs}>${manualToggleText}</button>`;
 
-        let summarySection = '';
+        const detailBlocks = [];
         if (manualDone && t.completionSummary) {
-          summarySection = `<div class="tb-summary" data-role="completion-summary">
+          detailBlocks.push(`<div class="tb-summary" data-role="completion-summary">
                 <div class="tb-summary-title">完了まとめ</div>
                 <pre class="tb-summary-body">${escapeHtml(t.completionSummary)}</pre>
-             </div>`;
+             </div>`);
         } else if (summaryPending) {
-          summarySection = `<div class="tb-summary tb-summary--pending" data-role="completion-summary">
+          detailBlocks.push(`<div class="tb-summary tb-summary--pending" data-role="completion-summary">
                 <div class="tb-summary-title">完了まとめ</div>
                 <div class="tb-summary-body tb-summary-body--pending" role="status" aria-live="polite">
                   <span class="tb-summary-spinner" aria-hidden="true"></span>
                   <span>完了まとめを取得中です...</span>
                 </div>
-             </div>`;
+             </div>`);
         }
+        const detailHtml = detailBlocks.length
+          ? (isExpanded ? `<div class="task-details">${detailBlocks.join('')}</div>` : '')
+          : '';
 
         // URL検出
         for (const match of urlMatches) {
@@ -4045,6 +4147,8 @@ async function initDocMenuTable() {
           statusText = '';  // 仕事中は上部ボタンに表示するのでここでは空
         } else if (s === 'codex-waiting') {
           statusText = '';  // 待機中も上部ボタンに表示するのでここでは空
+        } else if (s === 'codex-idle') {
+          statusText = 'Codex監視を停止しました。必要であれば「監視再開」を押してください。';
         } else if (isExternal && !isCodex) {
           // Codex以外の外部ターミナルの場合のみ表示
           const terminalLabel = activeTerminal && activeTerminal.app ? activeTerminal.app : 'ターミナル';
@@ -4061,20 +4165,24 @@ async function initDocMenuTable() {
           statusText = t.error ? String(t.error) : s;
         }
 
+        if (summaryPending) {
+          statusText = '完了まとめを取得中です...';
+        }
         if (manualDone) {
           statusText = '手動で完了済み';
         }
 
         const serverIdAttr = t.serverId ? escapeHtml(String(t.serverId)) : '';
         const cacheKey = escapeHtml(String(t.serverId || t.id));
+        const cardClasses = `task-item ${cls}${manualDone ? ' manual-done' : ''}${isExpanded ? ' is-expanded' : ''}`;
         return `
-          <div class="task-item ${cls}${manualDone ? ' manual-done' : ''}" data-id="${String(t.id)}" data-server-id="${serverIdAttr}" data-cache-key="${cacheKey}">
-            <button class="task-status ${cls}" data-action="open" title="詳細を表示">
+          <div class="${cardClasses}" data-id="${String(t.id)}" data-server-id="${serverIdAttr}" data-cache-key="${cacheKey}" data-expanded="${isExpanded ? 'true' : 'false'}">
+            <button class="task-status ${cls}" data-action="open" title="${escapeHtml(toggleTitle)}" aria-expanded="${isExpanded ? 'true' : 'false'}">
               <span class="i">${icon}</span>
             </button>
             <div class="task-text">
-              <div class="task-title-row">
-                <span class="task-title-text">${title}</span>
+              <div class="task-title-row" data-action="open">
+                <span class="task-title-text" title="${titleAttr}">${titleHtml}</span>
                 ${modelBadge}${manualToggle}
               </div>
               ${startedAt ? `<div class="tb-timestamp">開始: ${escapeHtml(startedAt)}${finishedAt ? ` / 更新: ${escapeHtml(finishedAt)}` : ''}</div>` : ''}
@@ -4082,7 +4190,7 @@ async function initDocMenuTable() {
               ${statusText ? `<span class="tb-meta-text" style="display:inline-block;opacity:0.8;margin-right:8px;">${escapeHtml(statusText)}</span>` : ''}
               ${items.join('')}
             </div>
-            ${summarySection}
+            ${detailHtml}
             ${showProgress ? `
               <div class="tb-progress" style="margin-top:6px;height:6px;border-radius:999px;background:rgba(255,255,255,0.1);overflow:hidden;position:relative;">
                 <div class="tb-progress-bar" style="height:100%;width:${progressPct}%;background:linear-gradient(90deg,#4a9eff,#00d4ff);transition:width 0.5s ease;position:relative;overflow:hidden;">
@@ -4377,9 +4485,10 @@ async function initDocMenuTable() {
     });
     listEl?.addEventListener('click', async (e) => {
       const any = e.target.closest('.task-item');
-      if (!any) return; const id = any.getAttribute('data-id');
+      if (!any) return;
+      const id = any.getAttribute('data-id');
       if (!id) return;
-      const actionEl = e.target.closest('[data-action="open-url"],[data-action="open-file"],[data-action="open-folder"],[data-action="focus-terminal"],[data-action="toggle-done"]');
+      const actionEl = e.target.closest('[data-action]');
       try {
         const task = state.tasks.find(t => String(t.id) === String(id));
         if (!task) throw new Error('task not found');
@@ -4455,6 +4564,21 @@ async function initDocMenuTable() {
             }
             return;
           }
+          if (action === 'resume-codex-monitor') {
+            e.preventDefault();
+            e.stopPropagation();
+            task.codexPollingDisabled = false;
+            task.codexIdleChecks = 0;
+            task.codexHasSeenWorking = false;
+            task.codexIsWorking = false;
+            if (task.externalTerminal && task.externalTerminal.sessionId) {
+              task.status = 'external';
+            }
+            schedulePersist();
+            render();
+            setTimeout(() => { try { updateCodexTaskStatuses(); } catch (_) {} }, 150);
+            return;
+          }
           if (action === 'toggle-done') {
             e.preventDefault();
             e.stopPropagation();
@@ -4485,6 +4609,8 @@ async function initDocMenuTable() {
                 task.completionSummary = '完了としてマークしました。必要に応じて詳細を追記してください。';
               }
               task.manualDone = true;
+              task.codexPollingDisabled = true;
+              task.codexIdleChecks = Math.max(task.codexIdleChecks || 0, CODEX_IDLE_STOP_THRESHOLD);
               if (task.status === 'external') {
                 task.status = 'completed';
               }
@@ -4492,43 +4618,68 @@ async function initDocMenuTable() {
               task.manualDone = false;
               task.completionSummaryPending = false;
               task.completionSummary = '';
+              task.codexPollingDisabled = false;
+              task.codexIdleChecks = 0;
+              task.codexHasSeenWorking = false;
+              if (task.externalTerminal && task.externalTerminal.sessionId) {
+                task.status = 'external';
+              }
             }
             task.updatedAt = new Date().toISOString();
             schedulePersist();
             render();
             return;
           }
+          if (action === 'open' || action === 'open-card') {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleTaskExpansion(task);
+            return;
+          }
+          // その他の data-action はここで処理済み
+          if (action) return;
         }
 
-        if (task.externalTerminal && task.externalTerminal.sessionId) {
-          await focusExternalTerminalTask(task);
+        const clickedInsideDetails = e.target.closest('.task-details');
+        if (clickedInsideDetails) return;
+
+        const selection = window.getSelection ? window.getSelection() : null;
+        if (selection && selection.rangeCount && selection.toString()) {
           return;
         }
-        
-        // AIチャット履歴を含む完全な情報
-        const fullData = {
-          id: task.id,
-          status: task.status,
-          prompt: task.prompt,
-          response: task.response,
-          result: task.result,
-          error: task.error,
-          createdAt: task.createdAt,
-          updatedAt: task.updatedAt,
-          // 詳細な実行結果情報
-          executionDetails: task.result ? {
-            turns: task.result.num_turns || task.result.numTurns,
-            duration_ms: task.result.duration_ms || task.result.durationMs,
-            cost_usd: task.result.total_cost_usd,
-            usage: task.result.usage,
-            session_id: task.result.session_id,
-            is_error: task.result.is_error
-          } : null,
-          // AIからの最終的な回答
-          aiResult: task.result && task.result.result ? task.result.result : null
-        };
-        
-        openJsonModal(JSON.stringify(fullData, null, 2), `Task #${id} - 詳細`);
+
+        if (actionEl && actionEl.getAttribute('data-action') === 'focus-terminal') {
+          // 念のためフォーカス系はここで打ち切る
+          return;
+        }
+
+        if (e.altKey || e.metaKey) {
+          const fullData = {
+            id: task.id,
+            status: task.status,
+            prompt: task.prompt,
+            response: task.response,
+            result: task.result,
+            error: task.error,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+            executionDetails: task.result ? {
+              turns: task.result.num_turns || task.result.numTurns,
+              duration_ms: task.result.duration_ms || task.result.durationMs,
+              cost_usd: task.result.total_cost_usd,
+              usage: task.result.usage,
+              session_id: task.result.session_id,
+              is_error: task.result.is_error
+            } : null,
+            aiResult: task.result && task.result.result ? task.result.result : null
+          };
+          openJsonModal(JSON.stringify(fullData, null, 2), `Task #${id} - 詳細`);
+          return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        toggleTaskExpansion(task);
       } catch(err) {
         openJsonModal(JSON.stringify({ error: '結果の取得に失敗しました', id, detail: String(err && err.message || err) }, null, 2), 'Result Error');
       }
@@ -4556,7 +4707,10 @@ async function initDocMenuTable() {
       if (navigator.platform && !navigator.platform.toLowerCase().includes('mac')) return;
       
       const codexTasks = state.tasks.filter(t => 
-        t.status === 'external' && 
+        t &&
+        t.status === 'external' &&
+        !t.manualDone &&
+        !(t.codexPollingDisabled) &&
         t.externalTerminal && 
         t.externalTerminal.command && 
         t.externalTerminal.command.toLowerCase().includes('codex')
@@ -4567,8 +4721,10 @@ async function initDocMenuTable() {
       const backendBase = await probeBackendBase();
       
       for (const task of codexTasks) {
-        if (!task.externalTerminal || !task.externalTerminal.sessionId) continue;
-        
+        if (!task || !task.externalTerminal || !task.externalTerminal.sessionId) continue;
+        ensureCodexMonitorState(task);
+        if (task.codexPollingDisabled) continue;
+
         try {
           const response = await fetch(`${backendBase}/api/terminal/codex/status`, {
             method: 'POST',
@@ -4583,12 +4739,35 @@ async function initDocMenuTable() {
             const data = await response.json();
             const wasWorking = task.codexIsWorking;
             const isNowWorking = data.isWorking || false;
-            
+            const backendSuggestStop = data.shouldStop === true;
+            const backendIdlePolls = Number.isFinite(data.idlePolls) ? data.idlePolls : 0;
+            if (data.seenWorking === true) {
+              task.codexHasSeenWorking = true;
+            }
+
             // レスポンスを更新して、Working状態を反映
             task.response = data.content || '';
             task.codexIsWorking = isNowWorking;
-            
-            console.log(`[Codex Status] Session ${task.externalTerminal.sessionId}: Working=${isNowWorking} (was=${wasWorking})`);
+            if (isNowWorking) {
+              task.codexHasSeenWorking = true;
+              task.codexIdleChecks = 0;
+            } else {
+              task.codexIdleChecks = (task.codexIdleChecks || 0) + 1;
+              if (backendIdlePolls > task.codexIdleChecks) {
+                task.codexIdleChecks = backendIdlePolls;
+              }
+            }
+
+            const shouldStopPolling = backendSuggestStop || (task.codexHasSeenWorking && task.codexIdleChecks >= CODEX_IDLE_STOP_THRESHOLD);
+            if (shouldStopPolling && !task.codexPollingDisabled) {
+              task.codexPollingDisabled = true;
+              task.codexIsWorking = false;
+              task.codexIdleChecks = Math.max(task.codexIdleChecks, CODEX_IDLE_STOP_THRESHOLD);
+              console.log(`[Codex Status] Monitoring stopped for ${task.externalTerminal.sessionId} (idle=${task.codexIdleChecks}, backendSuggestStop=${backendSuggestStop})`);
+              schedulePersist();
+            }
+
+            console.log(`[Codex Status] Session ${task.externalTerminal.sessionId}: Working=${isNowWorking} (was=${wasWorking}), idleChecks=${task.codexIdleChecks}, stopSuggested=${shouldStopPolling}`);
             
             // WorkingからWorking以外に変わった場合、自動的に完了まとめを取得
             // wasWorkingがtrueの場合のみ（初回チェック時はundefinedなので実行しない）
@@ -4612,19 +4791,29 @@ async function initDocMenuTable() {
                       .trim();
                     task.completionSummary = cleanedSummary;
                     task.manualDone = true;
+                    task.codexPollingDisabled = true;
+                    task.codexIdleChecks = Math.max(task.codexIdleChecks || 0, CODEX_IDLE_STOP_THRESHOLD);
+                    task.codexHasSeenWorking = true;
                     console.log(`[Codex Status] Completion summary generated for ${task.externalTerminal.sessionId}`);
                   } else {
                     // まとめが取得できなかった場合のデフォルトメッセージ
                     task.completionSummary = 'Codexでのタスクが完了しました。';
                     task.manualDone = true;
+                    task.codexPollingDisabled = true;
+                    task.codexIdleChecks = Math.max(task.codexIdleChecks || 0, CODEX_IDLE_STOP_THRESHOLD);
+                    task.codexHasSeenWorking = true;
                   }
                 } catch (err) {
                   console.error('[Codex Status] Failed to generate completion summary:', err);
                   // エラーの場合もデフォルトメッセージで完了
                   task.completionSummary = 'Codexでのタスクが完了しました。';
                   task.manualDone = true;
+                  task.codexPollingDisabled = true;
+                  task.codexIdleChecks = Math.max(task.codexIdleChecks || 0, CODEX_IDLE_STOP_THRESHOLD);
+                  task.codexHasSeenWorking = true;
                 } finally {
                   task.completionSummaryPending = false;
+                  schedulePersist();
                   render();
                 }
               }, 2000); // 2秒待機

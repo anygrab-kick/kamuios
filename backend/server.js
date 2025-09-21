@@ -59,6 +59,16 @@ function summarizeYamlContent(source, limit = 240) {
     return `${compact.slice(0, limit)}\n...`;
 }
 
+function createPromptPreview(text, limit = 12) {
+    if (!text) return '';
+    const lines = String(text).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const first = lines.length ? lines[0] : String(text).trim();
+    if (!first) return '';
+    if (first.length <= limit) return first;
+    const safeLimit = Math.max(0, limit - 1);
+    return `${first.slice(0, safeLimit)}…`;
+}
+
 function listSaasYamlFiles() {
     try {
         const entries = fs.readdirSync(SAAS_DIR, { withFileTypes: true });
@@ -1141,10 +1151,12 @@ function publicTaskView(task, includeLogs = false) {
     const logs = includeLogs ? takeTail(joinedLogs) : undefined;
     const stdout = includeLogs ? takeTail(task.stdout || '') : undefined;
     const stderr = includeLogs ? takeTail(task.stderr || '') : undefined;
+    const promptPreview = createPromptPreview(task.prompt || '', 12);
     return {
         id: task.id,
         status: task.status,
         prompt: task.prompt,
+        promptPreview,
         command: task.command,
         pid: task.pid,
         createdAt: task.createdAt,
@@ -1160,6 +1172,9 @@ function publicTaskView(task, includeLogs = false) {
         type: task.type || null,
         numTurns: task.resultMeta ? (task.resultMeta.num_turns ?? task.resultMeta.numTurns ?? null) : null,
         resultText: task.resultText,
+        manualDone: task.manualDone ? true : false,
+        completionSummary: typeof task.completionSummary === 'string' ? task.completionSummary : undefined,
+        completionSummaryPending: task.completionSummaryPending ? true : false,
         resultMeta: includeLogs ? task.resultMeta : undefined,
         monitor: task.monitor ? {
             intervalSec: task.monitor.intervalSec,
