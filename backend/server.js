@@ -69,6 +69,31 @@ function createPromptPreview(text, limit = 12) {
     return `${first.slice(0, safeLimit)}…`;
 }
 
+const PRIORITY_LEVELS = new Set(['low', 'medium', 'high']);
+function normalizePriorityLevel(value, fallback = null) {
+    if (value == null) return fallback;
+    const raw = String(value).trim();
+    if (!raw) return fallback;
+    const lower = raw.toLowerCase();
+    if (PRIORITY_LEVELS.has(lower)) return lower;
+
+    if (raw === '高' || raw === '重要' || raw === '緊急' || lower === 'urgent' || lower === 'high' || lower === 'critical' || lower === 'h' || lower === '3') {
+        return 'high';
+    }
+    if (raw === '中' || raw === '普通' || lower === 'medium' || lower === 'mid' || lower === 'm' || lower === '2') {
+        return 'medium';
+    }
+    if (raw === '低' || raw === '低い' || lower === 'low' || lower === 'l' || lower === '1') {
+        return 'low';
+    }
+    return fallback;
+}
+
+function resolvePriorityLevel(value, fallback = 'medium') {
+    const normalized = normalizePriorityLevel(value, fallback);
+    return normalized == null ? fallback : normalized;
+}
+
 function listSaasYamlFiles() {
     try {
         const entries = fs.readdirSync(SAAS_DIR, { withFileTypes: true });
@@ -157,7 +182,7 @@ let nextTaskId = 1;
 
 // タスク永続化設定
 const TASKS_STATE_FILE = path.join(__dirname, 'tasks-state.json');
-const TASKS_STATE_VERSION = 1;
+const TASKS_STATE_VERSION = 2;
 const TASKS_PERSIST_DEBOUNCE_MS = 1200;
 let tasksPersistTimer = null;
 let tasksPersistDirty = false;
@@ -181,6 +206,8 @@ function serializeTaskForPersist(task) {
         provider: task.provider || null,
         model: task.model || null,
         type: task.type || null,
+        importance: resolvePriorityLevel(task.importance),
+        urgency: resolvePriorityLevel(task.urgency),
         resultText: task.resultText || '',
         resultMeta: task.resultMeta || null,
         logs: Array.isArray(task.logs) ? task.logs.slice(-200) : [],
@@ -270,6 +297,8 @@ function rehydrateTaskFromPersisted(record) {
         provider: record.provider || null,
         model: record.model || null,
         type: record.type || null,
+        importance: normalizePriorityLevel(record.importance, 'medium'),
+        urgency: normalizePriorityLevel(record.urgency, 'medium'),
         manualDone: !!record.manualDone,
         completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
         completionSummaryPending: !!record.completionSummaryPending,
@@ -450,9 +479,11 @@ function appendAndParseOutput(task, chunk) {
     scheduleTasksPersist('output');
 }
 
-function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
+function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs, importance, urgency }) {
     const id = createTaskId();
     const resolvedMcp = mcpConfigPath || DEFAULT_CLAUDE_MCP_CONFIG;
+    const priorityImportance = resolvePriorityLevel(importance);
+    const priorityUrgency = resolvePriorityLevel(urgency);
     
     if (!resolvedMcp) {
         console.error('[ERROR] CLAUDE_MCP_CONFIG_PATH environment variable is not set');
@@ -543,7 +574,9 @@ function startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs }) {
         stderrBytes: 0,
         provider: 'claude',
         model: 'claude-headless',
-        type: 'claude_cli'
+        type: 'claude_cli',
+        importance: priorityImportance,
+        urgency: priorityUrgency
     };
     tasks[id] = task;
     scheduleTasksPersist('task_created');
@@ -951,7 +984,7 @@ function resolvePtyCommandConfig(payload) {
     return null;
 }
 
-function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides, extraArgs, skipGitCheck }) {
+function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides, extraArgs, skipGitCheck, importance, urgency }) {
     if (!prompt || !String(prompt).trim()) {
         throw new Error('Prompt is required for Codex task');
     }
@@ -1030,6 +1063,8 @@ function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides,
     });
 
     const nowIso = new Date().toISOString();
+    const priorityImportance = resolvePriorityLevel(importance);
+    const priorityUrgency = resolvePriorityLevel(urgency);
     const task = {
         id,
         status: 'running',
@@ -1056,7 +1091,9 @@ function startCodexTask({ prompt, model, profile, sandbox, cwd, configOverrides,
         stderrBytes: 0,
         provider: 'codex',
         model: resolvedModel || null,
-        type: 'codex_exec'
+        type: 'codex_exec',
+        importance: priorityImportance,
+        urgency: priorityUrgency
     };
 
     tasks[id] = task;
@@ -1388,6 +1425,8 @@ function publicTaskView(task, includeLogs = false) {
         provider: task.provider || null,
         model: task.model || null,
         type: task.type || null,
+        importance: resolvePriorityLevel(task.importance),
+        urgency: resolvePriorityLevel(task.urgency),
         numTurns: task.resultMeta ? (task.resultMeta.num_turns ?? task.resultMeta.numTurns ?? null) : null,
         resultText: task.resultText,
         manualDone: task.manualDone ? true : false,
@@ -2293,7 +2332,7 @@ const server = http.createServer((req, res) => {
                 const mcpConfigPath = payload.mcpConfigPath;
                 const cwd = payload.cwd;
                 const extraArgs = payload.extraArgs;
-                const task = startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs });
+                const task = startClaudeTask({ prompt, mcpConfigPath, cwd, extraArgs, importance: payload.importance, urgency: payload.urgency });
                 res.writeHead(202);
                 res.end(JSON.stringify({ task: publicTaskView(task, false) }));
             } catch (err) {
@@ -2352,6 +2391,8 @@ const server = http.createServer((req, res) => {
             try {
                 const payload = body ? JSON.parse(body) : {};
                 const prompt = payload.prompt || '';
+                const priorityImportance = resolvePriorityLevel(payload.importance);
+                const priorityUrgency = resolvePriorityLevel(payload.urgency);
                 
                 if (!prompt.trim()) {
                     res.writeHead(400);
@@ -2379,7 +2420,9 @@ const server = http.createServer((req, res) => {
                     files: [],
                     resultMeta: null,
                     resultText: '',
-                    type: 'claude_chat'
+                    type: 'claude_chat',
+                    importance: priorityImportance,
+                    urgency: priorityUrgency
                 };
                 tasks[chatTaskId] = taskRecord;
                 scheduleTasksPersist('claude_chat_created');
@@ -2567,7 +2610,9 @@ const server = http.createServer((req, res) => {
                     cwd: payload.cwd,
                     configOverrides: payload.configOverrides,
                     extraArgs: payload.extraArgs,
-                    skipGitCheck: payload.skipGitCheck
+                    skipGitCheck: payload.skipGitCheck,
+                    importance: payload.importance,
+                    urgency: payload.urgency
                 });
 
                 try {

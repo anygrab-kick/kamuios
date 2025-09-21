@@ -1587,7 +1587,8 @@ async function initDocMenuTable() {
       if (document.getElementById('aiTaskBoard') || document.querySelector('.taskboard-toggle')) return;
 
       const STORAGE_KEY = 'kamui_task_board_v1';
-      const STORAGE_VERSION = 3;
+      const STORAGE_VERSION = 4;
+      const STORAGE_BACKUP_KEY = 'kamui_task_board_backup';
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
@@ -1626,6 +1627,65 @@ async function initDocMenuTable() {
           externalTerminalType: 'codex-iterm'
         }
       ];
+      const PRIORITY_LEVELS = ['high', 'medium', 'low'];
+      const PRIORITY_LABELS = {
+        high: '高',
+        medium: '中',
+        low: '低'
+      };
+      const PRIORITY_ROW_ORDER = ['high', 'medium', 'low'];
+      const PRIORITY_COL_ORDER = ['low', 'medium', 'high'];
+      function normalizePriorityLevel(value, fallback = 'medium') {
+        if (value == null) return fallback;
+        const raw = String(value).trim();
+        if (!raw) return fallback;
+        const lower = raw.toLowerCase();
+        if (PRIORITY_LEVELS.includes(lower)) return lower;
+        if (raw === '高' || raw === '重要' || raw === '緊急' || lower === 'urgent' || lower === 'high' || lower === 'critical' || lower === 'h' || lower === '3') return 'high';
+        if (raw === '中' || raw === '普通' || lower === 'medium' || lower === 'mid' || lower === 'm' || lower === '2') return 'medium';
+        if (raw === '低' || raw === '低い' || lower === 'low' || lower === 'l' || lower === '1') return 'low';
+        return fallback;
+      }
+      function priorityLabel(level) {
+        const key = normalizePriorityLevel(level);
+        return PRIORITY_LABELS[key] || PRIORITY_LABELS.medium;
+      }
+      function priorityClass(level) {
+        const key = normalizePriorityLevel(level);
+        return `priority-${key}`;
+      }
+      function priorityKindIcon(kind) {
+        if (kind === 'importance') {
+          return '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.5 2.5 8 8 14.5 13.5 8 8 1.5Z"/></svg>';
+        }
+        return '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8.25 1.333 3.5 9.333h3.417l-1.167 5.334 6.417-8H8.25l.833-5.334Z"/></svg>';
+      }
+      function priorityIconSvg(kind, level) {
+        const normalized = normalizePriorityLevel(level);
+        if (kind === 'importance') {
+          if (normalized === 'high') {
+            return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 2.25 3.25 8h3v5.75h3.5V8h3L8 2.25Z"/></svg>';
+          }
+          if (normalized === 'low') {
+            return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 13.75 12.75 8h-3V2.25H6.25V8h-3L8 13.75Z"/></svg>';
+          }
+          return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 3.25a4.75 4.75 0 1 1 0 9.5 4.75 4.75 0 0 1 0-9.5Z"/></svg>';
+        }
+        // urgency icons
+        if (normalized === 'high') {
+          return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8.667 1.333 3 9.667h4v5L13 6.333H9.333l.666-5Z"/></svg>';
+        }
+        if (normalized === 'low') {
+          return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M4 4h8c.552 0 1 .448 1 1v1.5H3V5c0-.552.448-1 1-1Zm-1 4.5h10V11c0 .552-.448 1-1 1H4c-.552 0-1-.448-1-1V8.5Z"/></svg>';
+        }
+        return '<svg class="tb-priority-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.333a6.667 6.667 0 1 1 0 13.334A6.667 6.667 0 0 1 8 1.333Zm0 2.667a.667.667 0 0 0-.667.667v3.333a.667.667 0 0 0 .196.472l2 2a.667.667 0 0 0 .943-.943L8.667 7.78V4.667A.667.667 0 0 0 8 4Z"/></svg>';
+      }
+      function renderPriorityBadge(kind, level) {
+        const label = kind === 'importance' ? '重要度' : '緊急度';
+        const normalized = normalizePriorityLevel(level);
+        const title = `${label}: ${priorityLabel(normalized)}`;
+        return `<span class="tb-priority-badge ${priorityClass(normalized)}" data-kind="${kind}" title="${escapeAttr(title)}">${priorityIconSvg(kind, normalized)}<span class="tb-priority-text">${escapeHtml(priorityLabel(normalized))}</span></span>`;
+      }
       const state = {
         open: false,
         tasks: [],
@@ -1639,6 +1699,10 @@ async function initDocMenuTable() {
         activeModelId: MODEL_BLUEPRINTS[0]?.id || null,
         heatmapCollapsed: true,
         heatmapSelection: null,
+        matrixCollapsed: true,
+        matrixSelection: null,
+        composeImportance: 'medium',
+        composeUrgency: 'medium',
         expandedTaskIds: new Set()
       };
       const taskLogsCache = Object.create(null);
@@ -1692,13 +1756,9 @@ async function initDocMenuTable() {
       }
 
       function buildSyncStatusMessage(){
-        const parts = [];
-        const localTime = formatSyncTime(state.lastPersistAt);
         const backendTime = formatSyncTime(state.backendSnapshotAt);
-        if (localTime) parts.push(`ローカル ${localTime}`);
-        if (backendTime) parts.push(`サーバー ${backendTime}`);
-        if (!parts.length) return '保存待機中';
-        return parts.join(' / ');
+        if (backendTime) return `サーバー ${backendTime}`;
+        return '';
       }
 
       function updateSyncStatusFromState(variant = 'info', overrideMessage = null){
@@ -1708,7 +1768,9 @@ async function initDocMenuTable() {
         syncStatusEl.classList.remove('info','success','error');
         const applied = variant || 'info';
         syncStatusEl.classList.add(applied);
-        syncStatusEl.setAttribute('aria-hidden', message ? 'false' : 'true');
+        const hidden = !message;
+        syncStatusEl.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+        syncStatusEl.style.display = hidden ? 'none' : '';
       }
 
       function buildBackendWebSocketUrl(base, path) {
@@ -2369,17 +2431,17 @@ async function initDocMenuTable() {
 
       function renderHeatmap() {
         if (!heatmapEl) return;
-        if (analyticsEl) {
-          analyticsEl.classList.toggle('collapsed', !!state.heatmapCollapsed);
-        }
-        heatmapEl.classList.toggle('collapsed', !!state.heatmapCollapsed);
-        if (heatmapLegendEl) {
-          heatmapLegendEl.style.display = state.heatmapCollapsed ? 'none' : '';
-        }
-        if (state.heatmapCollapsed) {
-          heatmapEl.innerHTML = '';
-          return;
-        }
+      heatmapEl.classList.toggle('collapsed', !!state.heatmapCollapsed);
+      heatmapEl.style.display = state.heatmapCollapsed ? 'none' : '';
+      if (heatmapLegendEl) {
+        heatmapLegendEl.style.display = state.heatmapCollapsed ? 'none' : '';
+      }
+      updateHeatmapToggleLabel();
+      if (state.heatmapCollapsed) {
+        heatmapEl.innerHTML = '';
+        updateViewMode();
+        return;
+      }
         const { days, matrix, maxCount, totalInRange } = buildHeatmapData();
         if (!days.length) {
           heatmapEl.innerHTML = '<div class="tb-heatmap-empty">データが見つかりませんでした</div>';
@@ -2457,26 +2519,32 @@ async function initDocMenuTable() {
           if (!scrollWrap) return;
           scrollWrap.scrollLeft = scrollWrap.scrollWidth;
         });
+      updateViewMode();
       }
 
       function updateHeatmapToggleLabel() {
         if (!heatmapToggleEl) return;
-        heatmapToggleEl.textContent = state.heatmapCollapsed ? 'ヒートマップを表示' : 'ヒートマップを隠す';
+        heatmapToggleEl.textContent = 'ヒートマップ';
         heatmapToggleEl.setAttribute('aria-expanded', state.heatmapCollapsed ? 'false' : 'true');
+        heatmapToggleEl.classList.toggle('is-active', !state.heatmapCollapsed);
       }
 
-      function setHeatmapCollapsed(nextValue) {
-        const next = !!nextValue;
-        if (state.heatmapCollapsed === next) return;
-        state.heatmapCollapsed = next;
-        updateHeatmapToggleLabel();
-        renderHeatmap();
-        schedulePersist();
+    function setHeatmapCollapsed(nextValue) {
+      const next = !!nextValue;
+      if (state.heatmapCollapsed === next) return;
+      if (!next && !state.matrixCollapsed) {
+        setMatrixCollapsed(true);
       }
+      state.heatmapCollapsed = next;
+      updateHeatmapToggleLabel();
+      renderHeatmap();
+      if (!next) setOpen(true);
+      schedulePersist();
+    }
 
-      function setHeatmapSelection(nextSelection) {
-        let normalized = null;
-        if (nextSelection && typeof nextSelection === 'object') {
+    function setHeatmapSelection(nextSelection) {
+      let normalized = null;
+      if (nextSelection && typeof nextSelection === 'object') {
           const { dayKey, hour, dayLabel, hourLabel } = nextSelection;
           if (typeof dayKey === 'string' && dayKey.trim() !== '' && Number.isFinite(Number(hour))) {
             const hourNum = Number(hour);
@@ -2501,10 +2569,207 @@ async function initDocMenuTable() {
             return;
           }
         }
-        state.heatmapSelection = normalized;
-        render();
-        schedulePersist();
+      state.heatmapSelection = normalized;
+      render();
+      schedulePersist();
+    }
+
+    function updateViewMode() {
+      const heatmapActive = !state.heatmapCollapsed;
+      const matrixActive = !state.matrixCollapsed;
+      if (heatmapEl) {
+        heatmapEl.style.display = heatmapActive ? '' : 'none';
       }
+      if (matrixEl) {
+        matrixEl.style.display = matrixActive ? '' : 'none';
+      }
+      if (analyticsEl) {
+        analyticsEl.style.display = (heatmapActive || matrixActive) ? '' : 'none';
+      }
+      if (listEl) {
+        listEl.classList.remove('is-hidden');
+      }
+      if (composeEl) {
+        composeEl.classList.remove('is-hidden');
+      }
+    }
+
+    function setMatrixSelection(nextSelection, options = {}) {
+      const { silent = false } = options || {};
+      let normalized = null;
+      if (nextSelection && typeof nextSelection === 'object') {
+        normalized = {
+          importance: normalizePriorityLevel(nextSelection.importance, 'medium'),
+          urgency: normalizePriorityLevel(nextSelection.urgency, 'medium')
+        };
+      }
+      const prev = state.matrixSelection
+        ? {
+            importance: normalizePriorityLevel(state.matrixSelection.importance, 'medium'),
+            urgency: normalizePriorityLevel(state.matrixSelection.urgency, 'medium')
+          }
+        : null;
+      const changed = !!(prev?.importance !== normalized?.importance || prev?.urgency !== normalized?.urgency);
+      if (!changed && prev && normalized) {
+        if (!silent) render();
+        return;
+      }
+      state.matrixSelection = normalized;
+      schedulePersist();
+      if (!silent) {
+        render();
+      }
+    }
+
+    function clearMatrixSelection(options = {}) {
+      if (!state.matrixSelection) return;
+      setMatrixSelection(null, options);
+    }
+
+    function isMatrixTargetTask(task) {
+      if (!task) return false;
+      if (task.manualDone) return false;
+      const status = (task.status || '').toLowerCase();
+      if (status === 'completed') return false;
+      return true;
+    }
+
+    function buildPriorityMatrixData() {
+      const buckets = new Map();
+      PRIORITY_ROW_ORDER.forEach(importance => {
+        PRIORITY_COL_ORDER.forEach(urgency => {
+          buckets.set(`${importance}:${urgency}`, []);
+        });
+      });
+      const candidates = Array.isArray(state.tasks) ? state.tasks.filter(isMatrixTargetTask) : [];
+      candidates.forEach(task => {
+        const importance = normalizePriorityLevel(task.importance, 'medium');
+        const urgency = normalizePriorityLevel(task.urgency, 'medium');
+        const key = `${importance}:${urgency}`;
+        const list = buckets.get(key);
+        if (list) list.push(task);
+      });
+      buckets.forEach((list, key) => {
+        list.sort((a, b) => {
+          const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+          const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+          return bTime - aTime;
+        });
+      });
+      return { buckets, total: candidates.length };
+    }
+
+    function matchesMatrixSelection(task) {
+      if (!state.matrixSelection) return true;
+      const imp = normalizePriorityLevel(task.importance, 'medium');
+      const urg = normalizePriorityLevel(task.urgency, 'medium');
+      return imp === state.matrixSelection.importance && urg === state.matrixSelection.urgency;
+    }
+
+    function matrixChipSvg(statusKey) {
+      const palette = {
+        doing: '#3b82f6',
+        done: '#22c55e',
+        todo: '#94a3b8',
+        working: '#f97316',
+        waiting: '#facc15',
+        idle: '#0ea5e9'
+      };
+      const fill = palette[statusKey] || palette.todo;
+      return `<svg class="tb-chip-svg" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2" y="3" width="12" height="10" rx="2" fill="${fill}"/><rect x="4" y="6" width="8" height="1.4" rx="0.7" fill="rgba(255,255,255,0.85)"/><rect x="4" y="8.5" width="5" height="1.2" rx="0.6" fill="rgba(255,255,255,0.7)"/></svg>`;
+    }
+
+    function renderMatrixCell(tasks, importance, urgency) {
+      const list = Array.isArray(tasks) ? tasks : [];
+      const count = list.length;
+      const title = `重要度 ${priorityLabel(importance)} / 緊急度 ${priorityLabel(urgency)} / ${count}件`;
+      const chipLimit = 2;
+      const chips = [];
+      for (let i = 0; i < Math.min(count, chipLimit); i += 1) {
+        const task = list[i];
+        const fullPreview = getPromptPreview(task, 48) || (task.prompt || '(内容なし)');
+        const statusKey = cssStatus(task.status || 'pending');
+        chips.push(`<span class="tb-matrix-chip status-${escapeAttr(statusKey)}" data-id="${escapeAttr(String(task.id))}" title="${escapeAttr(fullPreview)}" aria-label="${escapeAttr(fullPreview)}" role="button" tabindex="0">${matrixChipSvg(statusKey)}</span>`);
+      }
+      if (count > chipLimit) {
+        chips.push(`<span class="tb-matrix-chip tb-matrix-chip-more" aria-label="追加${count - chipLimit}件" title="追加${count - chipLimit}件" role="presentation">+${count - chipLimit}</span>`);
+      }
+
+      const chipHtml = chips.length
+        ? `<div class="tb-matrix-chip-row">${chips.join('')}</div>`
+        : '<div class="tb-matrix-placeholder">タスクなし</div>';
+      const isSelected = state.matrixSelection
+        && state.matrixSelection.importance === importance
+        && state.matrixSelection.urgency === urgency;
+      const cellClasses = `tb-matrix-cell importance-${importance} urgency-${urgency}${isSelected ? ' is-selected' : ''}`;
+      return `
+        <div class="${cellClasses}" data-importance="${importance}" data-urgency="${urgency}" title="${escapeHtml(title)}" role="button" tabindex="0" aria-pressed="${isSelected ? 'true' : 'false'}">
+          <div class="tb-matrix-cell-count">${count}</div>
+          ${chipHtml}
+        </div>
+      `;
+    }
+
+    function renderPriorityMatrix() {
+      if (!matrixEl) return;
+      matrixEl.classList.toggle('collapsed', !!state.matrixCollapsed);
+      updateMatrixToggleLabel();
+      matrixEl.style.display = state.matrixCollapsed ? 'none' : '';
+      if (state.matrixCollapsed) {
+        matrixEl.innerHTML = '';
+        updateViewMode();
+        return;
+      }
+      const { buckets, total } = buildPriorityMatrixData();
+      if (!total) {
+        matrixEl.innerHTML = '<div class="tb-matrix-empty">保留中や未完了のタスクはありません</div>';
+        updateViewMode();
+        return;
+      }
+      let html = '<div class="tb-matrix-grid" role="table">';
+      html += '<div class="tb-matrix-corner">優先度マップ</div>';
+      PRIORITY_COL_ORDER.forEach(urgency => {
+        html += `<div class="tb-matrix-col-header urgency-${urgency}">${renderPriorityBadge('urgency', urgency)}</div>`;
+      });
+      PRIORITY_ROW_ORDER.forEach(importance => {
+        html += `<div class="tb-matrix-row-header importance-${importance}">${renderPriorityBadge('importance', importance)}</div>`;
+        PRIORITY_COL_ORDER.forEach(urgency => {
+          const key = `${importance}:${urgency}`;
+          html += renderMatrixCell(buckets.get(key) || [], importance, urgency);
+        });
+      });
+      html += '</div>';
+      matrixEl.innerHTML = html;
+      updateViewMode();
+    }
+
+    function updateMatrixToggleLabel() {
+      if (!matrixToggleEl) return;
+      matrixToggleEl.textContent = 'マトリクス';
+      matrixToggleEl.setAttribute('aria-expanded', state.matrixCollapsed ? 'false' : 'true');
+      matrixToggleEl.classList.toggle('is-active', !state.matrixCollapsed);
+    }
+
+    function setMatrixCollapsed(nextValue) {
+      const next = !!nextValue;
+      if (state.matrixCollapsed === next) return;
+      if (!next && !state.heatmapCollapsed) {
+        setHeatmapCollapsed(true);
+      }
+      if (next) {
+        clearMatrixSelection({ silent: true });
+      }
+      state.matrixCollapsed = next;
+      updateMatrixToggleLabel();
+      renderPriorityMatrix();
+      if (!next) {
+        setOpen(true);
+      }
+      schedulePersist();
+      if (next) {
+        render();
+      }
+    }
 
       function clearHeatmapSelection() {
         if (!state.heatmapSelection) return;
@@ -2709,6 +2974,8 @@ async function initDocMenuTable() {
           updatedAt: task.updatedAt || null,
           model: typeof task.model === 'string' ? task.model : null,
           provider: typeof task.provider === 'string' ? task.provider : null,
+          importance: normalizePriorityLevel(task.importance, 'medium'),
+          urgency: normalizePriorityLevel(task.urgency, 'medium'),
           manualDone: task.manualDone ? true : false,
           externalTerminal: task.externalTerminal && task.externalTerminal.sessionId
             ? {
@@ -2743,6 +3010,8 @@ async function initDocMenuTable() {
           updatedAt: record.updatedAt || null,
           model: record.model || null,
           provider: record.provider || null,
+          importance: normalizePriorityLevel(record.importance, 'medium'),
+          urgency: normalizePriorityLevel(record.urgency, 'medium'),
           manualDone: !!record.manualDone,
           externalTerminal: record.externalTerminal && record.externalTerminal.sessionId
             ? {
@@ -2789,8 +3058,23 @@ async function initDocMenuTable() {
         }
       }
 
+      function backupCurrentData(){
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            localStorage.setItem(STORAGE_BACKUP_KEY, raw);
+            console.log('Created backup of task board data');
+          }
+        } catch (err) {
+          console.error('Failed to backup data:', err);
+        }
+      }
+
       function persistNow(){
         try {
+          // 現在のデータをバックアップ（念のため）
+          backupCurrentData();
+          
           const prepared = state.tasks.slice(0, MAX_TASK_HISTORY).map(cloneTaskForStorage).filter(Boolean);
           const keepKeys = new Set(prepared.map(task => (task.serverId ? String(task.serverId) : String(task.id))).filter(Boolean));
           const logsPayload = {};
@@ -2816,6 +3100,13 @@ async function initDocMenuTable() {
               dayLabel: state.heatmapSelection.dayLabel,
               hourLabel: state.heatmapSelection.hourLabel
             } : null,
+            matrixCollapsed: !!state.matrixCollapsed,
+            matrixSelection: state.matrixSelection ? {
+              importance: state.matrixSelection.importance,
+              urgency: state.matrixSelection.urgency
+            } : null,
+            composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
+            composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium'),
             persistedAt
           };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -2833,13 +3124,30 @@ async function initDocMenuTable() {
 
       function loadPersistedState(){
         try {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          if (!raw) return;
+          let raw = localStorage.getItem(STORAGE_KEY);
+          
+          // メインデータがない場合、バックアップから復元を試みる
+          if (!raw) {
+            const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
+            if (backup) {
+              console.warn('Main data not found, attempting to restore from backup...');
+              raw = backup;
+              // バックアップからメインに復元
+              localStorage.setItem(STORAGE_KEY, backup);
+            } else {
+              return;
+            }
+          }
+          
           const saved = JSON.parse(raw);
           if (!saved || typeof saved !== 'object') return;
+          // バージョンが異なる場合でもデータを削除せず、可能な限り移行する
           if (saved.version !== STORAGE_VERSION) {
-            localStorage.removeItem(STORAGE_KEY);
-            return;
+            console.warn(`LocalStorage version mismatch: expected ${STORAGE_VERSION}, got ${saved.version}. Attempting migration...`);
+            // 古いバージョンのデータでも、tasksがあれば読み込む
+            if (saved.tasks && Array.isArray(saved.tasks)) {
+              console.log(`Migrating ${saved.tasks.length} tasks from version ${saved.version} to ${STORAGE_VERSION}`);
+            }
           }
           if (typeof saved.open === 'boolean') state.open = saved.open;
           if (typeof saved.backendBase === 'string' && saved.backendBase) {
@@ -2850,6 +3158,24 @@ async function initDocMenuTable() {
           }
           if (typeof saved.backendSnapshotAt === 'string' && saved.backendSnapshotAt) {
             state.backendSnapshotAt = saved.backendSnapshotAt;
+          }
+          if (typeof saved.matrixCollapsed === 'boolean') {
+            state.matrixCollapsed = saved.matrixCollapsed;
+          }
+          if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
+            const { importance, urgency } = saved.matrixSelection;
+            if (importance && urgency) {
+              state.matrixSelection = {
+                importance: normalizePriorityLevel(importance, 'medium'),
+                urgency: normalizePriorityLevel(urgency, 'medium')
+              };
+            }
+          }
+          if (saved.composeImportance) {
+            state.composeImportance = normalizePriorityLevel(saved.composeImportance, 'medium');
+          }
+          if (saved.composeUrgency) {
+            state.composeUrgency = normalizePriorityLevel(saved.composeUrgency, 'medium');
           }
           if (Array.isArray(saved.tasks)) {
             const revived = saved.tasks.map(hydrateCachedTask).filter(Boolean);
@@ -2942,11 +3268,11 @@ async function initDocMenuTable() {
         const option = getActiveModelOption();
         if (option) {
           const label = option.shortLabel || option.label || option.id || 'モデル';
-          modelToggleEl.textContent = `@${label}`;
+          modelToggleEl.textContent = label;
           modelToggleEl.setAttribute('data-model', option.id);
           modelToggleEl.setAttribute('title', `${option.label || label}（@で変更）`);
         } else {
-          modelToggleEl.textContent = '@モデル';
+          modelToggleEl.textContent = 'モデル';
           modelToggleEl.removeAttribute('data-model');
           modelToggleEl.setAttribute('title', '@でモデルを選択');
         }
@@ -2983,6 +3309,8 @@ async function initDocMenuTable() {
           exitCode: Number.isFinite(record.exitCode) ? record.exitCode : (typeof record.exitCode === 'string' ? record.exitCode : null),
           model: record.model || null,
           provider: record.provider || null,
+          importance: normalizePriorityLevel(record.importance, 'medium'),
+          urgency: normalizePriorityLevel(record.urgency, 'medium'),
           manualDone: record.manualDone ? true : false,
           completionSummary: typeof record.completionSummary === 'string' ? record.completionSummary : '',
           completionSummaryPending: record.completionSummaryPending ? true : false,
@@ -3084,7 +3412,10 @@ async function initDocMenuTable() {
       <div class="taskboard-header">
         <div class="tb-title">エージェントタスク</div>
         <div class="tb-sync-status info" id="taskboardSyncStatus" aria-live="polite" aria-hidden="true"></div>
-        <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false">ヒートマップを表示</button>
+        <div class="tb-header-toggles">
+          <button type="button" id="taskboardHeatmapToggle" class="tb-heatmap-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="4" height="4" rx="1"></rect><rect x="7" y="2" width="4" height="4" rx="1"></rect><rect x="12" y="2" width="2" height="4" rx="1"></rect><rect x="2" y="7" width="4" height="4" rx="1"></rect><rect x="7" y="7" width="4" height="4" rx="1"></rect><rect x="12" y="7" width="2" height="4" rx="1"></rect><rect x="2" y="12" width="4" height="2" rx="1"></rect><rect x="7" y="12" width="4" height="2" rx="1"></rect><rect x="12" y="12" width="2" height="2" rx="1"></rect></svg></span><span class="tb-toggle-label">ヒートマップ</span></button>
+          <button type="button" id="taskboardMatrixToggle" class="tb-matrix-toggle" aria-expanded="false"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"></rect><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"></rect><rect x="9" y="9" width="5.5" height="5.5" rx="1"></rect></svg></span><span class="tb-toggle-label">マトリクス</span></button>
+        </div>
         <div class="tb-actions">
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
         </div>
@@ -3092,14 +3423,40 @@ async function initDocMenuTable() {
       <div class="taskboard-analytics">
         <div class="tb-heatmap-legend" id="taskboardHeatmapLegend"></div>
         <div class="taskboard-heatmap" id="taskboardHeatmap" role="img" aria-label="直近14日間の時間帯別タスク数ヒートマップ"></div>
+        <div class="taskboard-matrix" id="taskboardMatrix" role="img" aria-label="重要度と緊急度のマトリクス"></div>
       </div>
       <div class="taskboard-list" id="taskboardList" aria-live="polite"></div>
       <div class="taskboard-compose">
-        <button type="button" id="taskboardModelBadge" class="tb-model-toggle" aria-label="使用モデル (@で変更)">@Claude</button>
-        <div class="tb-input-wrapper">
-          <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (/でMCPダイヤル、@でモデル選択、Enterで追加)" autocomplete="off" />
+        <div class="tb-compose-row-1">
+          <button type="button" id="taskboardModelBadge" class="tb-model-toggle" aria-label="使用モデル (@で変更)">Claude</button>
+          <div class="tb-input-wrapper">
+            <input type="text" id="taskboardInput" class="tb-input" placeholder="新規タスクを入力... (/でMCPダイヤル、@でモデル選択、Enterで追加)" autocomplete="off" />
+          </div>
         </div>
-        <button type="button" id="taskboardSend" class="tb-send" aria-label="送信">送信</button>
+        <div class="tb-compose-row-2">
+          <div class="tb-compose-center">
+            <label class="tb-priority-select-wrap" for="taskboardImportance" aria-label="重要度">
+              <span class="tb-priority-icon-wrap">${priorityKindIcon('importance')}</span>
+              <select id="taskboardImportance" class="tb-priority-select">
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+              </select>
+            </label>
+            <label class="tb-priority-select-wrap" for="taskboardUrgency" aria-label="緊急度">
+              <span class="tb-priority-icon-wrap">${priorityKindIcon('urgency')}</span>
+              <select id="taskboardUrgency" class="tb-priority-select">
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+              </select>
+            </label>
+          </div>
+          <div class="tb-compose-buttons">
+            <button type="button" id="taskboardRun" class="tb-send tb-run" aria-label="実行">実行</button>
+            <button type="button" id="taskboardHold" class="tb-hold" aria-label="保留">保留</button>
+          </div>
+        </div>
       </div>
     `;
 
@@ -3110,14 +3467,38 @@ async function initDocMenuTable() {
     const heatmapEl = panel.querySelector('#taskboardHeatmap');
     const heatmapLegendEl = panel.querySelector('#taskboardHeatmapLegend');
     const heatmapToggleEl = panel.querySelector('#taskboardHeatmapToggle');
+    const matrixEl = panel.querySelector('#taskboardMatrix');
+    const matrixToggleEl = panel.querySelector('#taskboardMatrixToggle');
     const analyticsEl = panel.querySelector('.taskboard-analytics');
     const inputEl = panel.querySelector('#taskboardInput');
-    const sendEl  = panel.querySelector('#taskboardSend');
+    const importanceEl = panel.querySelector('#taskboardImportance');
+    const urgencyEl = panel.querySelector('#taskboardUrgency');
+    const runEl  = panel.querySelector('#taskboardRun');
+    const holdEl = panel.querySelector('#taskboardHold');
+    const composeEl = panel.querySelector('.taskboard-compose');
     const hideEl  = panel.querySelector('.tb-hide');
     modelToggleEl = panel.querySelector('#taskboardModelBadge');
     syncStatusEl = panel.querySelector('#taskboardSyncStatus');
     updateSyncStatusFromState('info');
     updateModelBadge();
+    if (importanceEl) {
+      importanceEl.value = normalizePriorityLevel(state.composeImportance, 'medium');
+      importanceEl.addEventListener('change', (event) => {
+        const value = normalizePriorityLevel(event.target.value, 'medium');
+        state.composeImportance = value;
+        importanceEl.value = value;
+        schedulePersist();
+      });
+    }
+    if (urgencyEl) {
+      urgencyEl.value = normalizePriorityLevel(state.composeUrgency, 'medium');
+      urgencyEl.addEventListener('change', (event) => {
+        const value = normalizePriorityLevel(event.target.value, 'medium');
+        state.composeUrgency = value;
+        urgencyEl.value = value;
+        schedulePersist();
+      });
+    }
     modelToggleEl?.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -3345,9 +3726,119 @@ async function initDocMenuTable() {
     if (heatmapToggleEl) {
       heatmapToggleEl.addEventListener('click', (e) => {
         e.preventDefault();
-        setHeatmapCollapsed(!state.heatmapCollapsed);
+        if (state.heatmapCollapsed) {
+          setHeatmapCollapsed(false);
+        } else {
+          setHeatmapCollapsed(true);
+        }
       });
       updateHeatmapToggleLabel();
+    }
+    if (matrixToggleEl) {
+      matrixToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (state.matrixCollapsed) {
+          setMatrixCollapsed(false);
+        } else {
+          setMatrixCollapsed(true);
+        }
+      });
+      updateMatrixToggleLabel();
+    } else {
+      updateMatrixToggleLabel();
+    }
+    updateViewMode();
+    if (matrixEl && !matrixEl.dataset.bound) {
+      matrixEl.dataset.bound = '1';
+      function openTaskFromMatrixChip(id) {
+        if (!id) return;
+        const task = state.tasks.find((t) => String(t.id) === String(id));
+        if (!task) return;
+        setOpen(true);
+        if (!isTaskExpanded(task)) {
+          setTaskExpanded(task, true);
+        }
+        render();
+        requestAnimationFrame(() => {
+          const escapedId = (window.CSS && typeof window.CSS.escape === 'function')
+            ? window.CSS.escape(String(id))
+            : String(id).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+          const card = listEl ? listEl.querySelector(`.task-item[data-id="${escapedId}"]`) : null;
+          if (card) {
+            card.classList.add('task-highlight');
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => card.classList.remove('task-highlight'), 1200);
+          }
+        });
+      }
+
+      matrixEl.addEventListener('click', (event) => {
+        const chip = event.target.closest('.tb-matrix-chip');
+        const cell = event.target.closest('.tb-matrix-cell');
+        if (chip && !chip.classList.contains('tb-matrix-chip-more')) {
+          const id = chip.getAttribute('data-id');
+          const parentCell = chip.closest('.tb-matrix-cell');
+          if (parentCell) {
+            const importance = parentCell.getAttribute('data-importance');
+            const urgency = parentCell.getAttribute('data-urgency');
+            if (importance && urgency) {
+              setMatrixSelection({ importance, urgency });
+            }
+          }
+          if (id) {
+            openTaskFromMatrixChip(id);
+          }
+          return;
+        }
+        if (cell) {
+          const importance = cell.getAttribute('data-importance');
+          const urgency = cell.getAttribute('data-urgency');
+          if (!importance || !urgency) return;
+          const already = state.matrixSelection
+            && state.matrixSelection.importance === importance
+            && state.matrixSelection.urgency === urgency;
+          if (already) {
+            clearMatrixSelection();
+          } else {
+            setMatrixSelection({ importance, urgency });
+          }
+        }
+      });
+
+      matrixEl.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        const chip = event.target.closest('.tb-matrix-chip');
+        if (chip && !chip.classList.contains('tb-matrix-chip-more')) {
+          const id = chip.getAttribute('data-id');
+          if (id) {
+            const parentCell = chip.closest('.tb-matrix-cell');
+            if (parentCell) {
+              const importance = parentCell.getAttribute('data-importance');
+              const urgency = parentCell.getAttribute('data-urgency');
+              if (importance && urgency) {
+                setMatrixSelection({ importance, urgency });
+              }
+            }
+            event.preventDefault();
+            openTaskFromMatrixChip(id);
+          }
+          return;
+        }
+        const cell = event.target.closest('.tb-matrix-cell');
+        if (!cell) return;
+        const importance = cell.getAttribute('data-importance');
+        const urgency = cell.getAttribute('data-urgency');
+        if (!importance || !urgency) return;
+        event.preventDefault();
+        const already = state.matrixSelection
+          && state.matrixSelection.importance === importance
+          && state.matrixSelection.urgency === urgency;
+        if (already) {
+          clearMatrixSelection();
+        } else {
+          setMatrixSelection({ importance, urgency });
+        }
+      });
     }
     // Create a global dial overlay for MCP tools
     let dialOverlay = document.getElementById('mcpDialOverlay');
@@ -4042,6 +4533,7 @@ async function initDocMenuTable() {
       if (s === 'codex-working') return 'working'; // Codex実行中用のステータス
       if (s === 'codex-waiting') return 'waiting'; // Codex待機中用のステータス
       if (s === 'codex-idle') return 'idle'; // Codex監視停止用のステータス
+      if (s === 'pending') return 'todo';
       return 'todo';
     }
     function iconFor(s){
@@ -4052,6 +4544,7 @@ async function initDocMenuTable() {
       if (s === 'codex-working') return '🛠️'; // Codex実行中用のアイコン
       if (s === 'codex-waiting') return '⏸️'; // Codex待機中用のアイコン
       if (s === 'codex-idle') return '💤'; // Codex監視停止のアイコン
+      if (s === 'pending') return '📝';
       return '';
     }
 
@@ -4104,6 +4597,8 @@ async function initDocMenuTable() {
         if (typeof task.completionSummary !== 'string') {
           state.tasks[idx].completionSummary = typeof existing.completionSummary === 'string' ? existing.completionSummary : '';
         }
+        state.tasks[idx].importance = normalizePriorityLevel(state.tasks[idx].importance, 'medium');
+        state.tasks[idx].urgency = normalizePriorityLevel(state.tasks[idx].urgency, 'medium');
         ensureCodexMonitorState(state.tasks[idx]);
       } else {
         if (typeof task.manualDone !== 'boolean') {
@@ -4112,6 +4607,8 @@ async function initDocMenuTable() {
         if (typeof task.completionSummary !== 'string') {
           task.completionSummary = '';
         }
+        task.importance = normalizePriorityLevel(task.importance, 'medium');
+        task.urgency = normalizePriorityLevel(task.urgency, 'medium');
         ensureCodexMonitorState(task);
         state.tasks.unshift(task);
       }
@@ -4137,119 +4634,161 @@ async function initDocMenuTable() {
       return false;
     }
 
-    async function submitRemoteTask(text){
-      const rawInput = typeof text === 'string' ? text : '';
-      const prompt = rawInput.trim();
-      const selectedModel = getActiveModelOption();
-      const isExternalModel = selectedModel && selectedModel.externalTerminalType === 'codex-iterm';
-      if (!prompt && !isExternalModel) return;
-      if (prompt && handleInlineCommand(prompt)) return;
-      if (isExternalModel) {
-        try {
-          const result = await launchCodexTerminalSession(prompt, selectedModel);
-          const now = new Date().toISOString();
-          const sessionId = result && result.sessionId ? String(result.sessionId) : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const displayPrompt = prompt || '@Codex+terminal';
-          const task = {
-            id: sessionId,
-            status: 'external',
-            prompt: displayPrompt,
-            createdAt: now,
-            updatedAt: now,
-            response: '',
-            result: null,
-            error: null,
-            model: selectedModel.id,
-            provider: selectedModel.provider || null,
-            externalTerminal: {
-              sessionId,
-              app: result && result.app ? String(result.app) : 'iTerm',
-              command: result && result.command ? String(result.command) : 'codex',
-              appleSessionId: result && result.appleSessionId ? String(result.appleSessionId) : null
-            },
-            manualDone: false,
-            completionSummary: '',
-            logs: [],
-            codexIsWorking: false // 初期状態はfalse
-          };
-          mergeTask(task);
-          render();
-        } catch (err) {
-          const now = new Date().toISOString();
-          const message = err && err.message ? err.message : String(err || 'unknown_error');
-          const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const task = {
-            id: tempId,
-            status: 'failed',
-            prompt: prompt || '@Codex+terminal',
-            createdAt: now,
-            updatedAt: now,
-            response: '',
-            result: null,
-            error: `Codexターミナルの起動に失敗: ${message}`,
-            model: selectedModel ? selectedModel.id : null,
-            provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
-            manualDone: false,
-            completionSummary: '',
-            logs: []
-          };
-          mergeTask(task);
-          render();
-        }
-        return;
+    async function submitRemoteTask(text, options = {}){
+      const {
+        existingTask = null,
+        importance: importanceOverride = null,
+        urgency: urgencyOverride = null,
+        modelOption: explicitModel = null
+      } = typeof options === 'object' && options ? options : {};
+
+      const basePrompt = existingTask && typeof existingTask.prompt === 'string'
+        ? existingTask.prompt
+        : (typeof text === 'string' ? text : '');
+      const prompt = basePrompt.trim();
+
+      let selectedModel = explicitModel || null;
+      if (!selectedModel && existingTask && existingTask.model) {
+        selectedModel = findModelOption(existingTask.model);
       }
+      if (!selectedModel) {
+        selectedModel = getActiveModelOption();
+      }
+
+      const importance = normalizePriorityLevel(
+        importanceOverride != null ? importanceOverride : (existingTask ? existingTask.importance : state.composeImportance),
+        'medium'
+      );
+      const urgency = normalizePriorityLevel(
+        urgencyOverride != null ? urgencyOverride : (existingTask ? existingTask.urgency : state.composeUrgency),
+        'medium'
+      );
+
+      const isExternalModel = selectedModel && selectedModel.externalTerminalType === 'codex-iterm';
+      const allowEmptyPrompt = isExternalModel;
+      if (!prompt && !allowEmptyPrompt) return;
+
+      if (!existingTask && prompt && handleInlineCommand(prompt)) return;
+
+      const now = new Date().toISOString();
+      let task;
+      if (existingTask) {
+        task = { ...existingTask };
+        if (!task.id) task.id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        if (!task.createdAt) task.createdAt = now;
+        task.status = isExternalModel ? 'external' : 'running';
+        task.updatedAt = now;
+        task.error = null;
+        task.response = '';
+        task.result = null;
+        task.logs = Array.isArray(task.logs) ? task.logs.slice() : [];
+        task.urls = Array.isArray(task.urls) ? task.urls.slice() : [];
+        task.files = Array.isArray(task.files) ? task.files.slice() : [];
+        task.manualDone = false;
+        task.completionSummary = '';
+      } else {
+        const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        task = {
+          id: tempId,
+          status: isExternalModel ? 'external' : 'running',
+          prompt: prompt,
+          createdAt: now,
+          updatedAt: now,
+          response: '',
+          result: null,
+          error: null,
+          logs: [],
+          urls: [],
+          files: [],
+          manualDone: false,
+          completionSummary: ''
+        };
+      }
+
+      task.prompt = typeof task.prompt === 'string' ? task.prompt : basePrompt;
+      task.importance = importance;
+      task.urgency = urgency;
+      if (selectedModel) {
+        task.model = selectedModel.id || task.model || null;
+        task.provider = selectedModel.provider || task.provider || null;
+      } else {
+        task.model = task.model || null;
+        task.provider = task.provider || null;
+      }
+
+      const effectivePrompt = typeof task.prompt === 'string' ? task.prompt : '';
+
       if (selectedModel && selectedModel.ptyCommand) {
         const commandId = selectedModel.ptyCommand;
-        const inlinePrompt = prompt ? `@${commandId} ${prompt}` : `@${commandId}`;
+        const inlinePrompt = effectivePrompt ? `@${commandId} ${effectivePrompt}` : `@${commandId}`;
         if (!handleInlineCommand(inlinePrompt)) {
-          Promise.resolve(terminalManager.open(commandId, { initialInput: prompt }))
+          Promise.resolve(terminalManager.open(commandId, { initialInput: effectivePrompt }))
             .catch((err) => console.error('[Terminal] Failed to open PTY session via model shortcut', err));
         }
         return;
       }
-      const modelId = selectedModel ? selectedModel.id : null;
-      const now = new Date().toISOString();
-      const tempId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const task = {
-        id: tempId,
-        status: 'running',
-        prompt,
-        createdAt: now,
-        updatedAt: now,
-        response: '',
-        result: null,
-        error: null,
-        model: modelId,
-        provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
-        manualDone: false,
-        completionSummary: ''
-      };
+
+      if (isExternalModel) {
+        try {
+          const result = await launchCodexTerminalSession(effectivePrompt, selectedModel);
+          const sessionId = result && result.sessionId ? String(result.sessionId) : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          task.status = 'external';
+          task.updatedAt = now;
+          task.externalTerminal = {
+            sessionId,
+            app: result && result.app ? String(result.app) : 'iTerm',
+            command: result && result.command ? String(result.command) : 'codex',
+            appleSessionId: result && result.appleSessionId ? String(result.appleSessionId) : null
+          };
+          task.codexIsWorking = false;
+          task.logs = [];
+          mergeTask(task);
+          render();
+        } catch (err) {
+          const message = err && err.message ? err.message : String(err || 'unknown_error');
+          task.status = 'failed';
+          task.error = `Codexターミナルの起動に失敗: ${message}`;
+          task.updatedAt = now;
+          mergeTask(task);
+          render();
+        }
+        return;
+      }
+
       mergeTask(task);
       render();
+
+      const base = await probeBackendBase();
+      if (!base) {
+        task.status = 'failed';
+        task.error = 'バックエンド未接続のため実行できません';
+        task.updatedAt = new Date().toISOString();
+        mergeTask(task);
+        render();
+        return;
+      }
+
       try {
-        const base = await probeBackendBase();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分のタイムアウト
         const endpointPath = selectedModel && selectedModel.endpoint ? selectedModel.endpoint : '/api/claude/chat';
-        const payload = Object.assign({ prompt }, buildModelPayload(selectedModel));
+        const payload = Object.assign({ prompt: effectivePrompt, importance, urgency }, buildModelPayload(selectedModel));
 
-        const res = await fetch(`${base.replace(/\/$/, '')}${endpointPath}`, { 
-          method: 'POST', 
-          headers: { 'Content-Type': 'application/json' }, 
+        const res = await fetch(`${base.replace(/\/$/, '')}${endpointPath}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
           signal: controller.signal
         });
-        
+
         clearTimeout(timeoutId);
-        
+
         if (!res.ok) throw new Error(`submit failed (${res.status})`);
         const data = await res.json();
         task.status = 'completed';
         task.response = data && typeof data.response === 'string' ? data.response : '';
         task.result = data && data.result ? data.result : null;
-        task.serverId = data && data.taskId ? String(data.taskId) : null;
-        task.model = modelId;
-        task.provider = selectedModel && selectedModel.provider ? selectedModel.provider : task.provider;
+        task.serverId = data && data.taskId ? String(data.taskId) : task.serverId || null;
         const assistantLogs = Array.isArray(data && data.logs) ? data.logs.map(log => String(log)) : [];
         task.logs = assistantLogs;
         const cacheKey = task.serverId || task.id;
@@ -4263,7 +4802,7 @@ async function initDocMenuTable() {
           schedulePersist();
         }
         task.updatedAt = new Date().toISOString();
-      } catch(err) {
+      } catch (err) {
         task.status = 'failed';
         if (err.name === 'AbortError') {
           task.error = 'タイムアウト: 処理に時間がかかりすぎました（5分以上）';
@@ -4275,6 +4814,39 @@ async function initDocMenuTable() {
         taskLogsCache[task.serverId || task.id] = errorLog.length > MAX_LOG_LENGTH ? errorLog.slice(-MAX_LOG_LENGTH) : errorLog;
         schedulePersist();
       }
+
+      mergeTask(task);
+      render();
+    }
+
+    function createPendingTask(text){
+      const rawInput = typeof text === 'string' ? text : '';
+      const prompt = rawInput.trim();
+      if (!prompt) return;
+      const selectedModel = getActiveModelOption();
+      const now = new Date().toISOString();
+      const tempId = `pending-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const importance = normalizePriorityLevel(state.composeImportance, 'medium');
+      const urgency = normalizePriorityLevel(state.composeUrgency, 'medium');
+      const task = {
+        id: tempId,
+        status: 'pending',
+        prompt,
+        createdAt: now,
+        updatedAt: now,
+        response: '',
+        result: null,
+        error: null,
+        model: selectedModel ? selectedModel.id : null,
+        provider: selectedModel && selectedModel.provider ? selectedModel.provider : null,
+        manualDone: false,
+        completionSummary: '',
+        importance,
+        urgency,
+        logs: [],
+        urls: [],
+        files: []
+      };
       mergeTask(task);
       render();
     }
@@ -4308,6 +4880,7 @@ async function initDocMenuTable() {
       if (!Array.isArray(state.tasks) || state.tasks.length === 0){
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
         renderHeatmap();
+        renderPriorityMatrix();
         return;
       }
 
@@ -4323,25 +4896,38 @@ async function initDocMenuTable() {
           delete taskLogsCache[cacheKey];
         }
       });
-      const filterNotice = (() => {
-        if (!state.heatmapSelection) return '';
+      const notices = [];
+      if (state.heatmapSelection) {
         const parts = [];
         if (state.heatmapSelection.dayLabel) parts.push(state.heatmapSelection.dayLabel);
         else parts.push(state.heatmapSelection.dayKey);
         const hourLabel = state.heatmapSelection.hourLabel || formatHourLabel(state.heatmapSelection.hour);
         parts.push(hourLabel);
         const label = parts.join(' / ');
-        return `
+        notices.push(`
           <div class="tb-filter-notice" data-role="heatmap-filter">
             <span class="tb-filter-label">選択中: ${escapeHtml(label)}</span>
             <button type="button" class="tb-filter-clear" data-action="clear-heatmap-filter" aria-label="選択をクリア">×</button>
           </div>
-        `;
-      })();
+        `);
+      }
+      if (state.matrixSelection) {
+        const badge = `${renderPriorityBadge('importance', state.matrixSelection.importance)} ${renderPriorityBadge('urgency', state.matrixSelection.urgency)}`;
+        notices.push(`
+          <div class="tb-filter-notice" data-role="matrix-filter">
+            <span class="tb-filter-label">選択中: ${badge}</span>
+            <button type="button" class="tb-filter-clear" data-action="clear-matrix-filter" aria-label="選択をクリア">×</button>
+          </div>
+        `);
+      }
+      const noticeHtml = notices.join('');
 
-      const tasksToRender = (state.heatmapSelection
+      const baseTasks = state.heatmapSelection
         ? state.tasks.filter(matchesHeatmapSelection)
-        : state.tasks.slice());
+        : state.tasks.slice();
+      const tasksToRender = state.matrixSelection
+        ? baseTasks.filter(matchesMatrixSelection)
+        : baseTasks;
 
       const cardsHtml = tasksToRender.map(t => {
         const manualDone = !!(t && t.manualDone);
@@ -4378,7 +4964,17 @@ async function initDocMenuTable() {
         const toggleTitle = isExpanded ? '詳細を閉じる' : '詳細を表示';
         const urlMatches = responseText.matchAll(/https?:\/\/[^\s`]+/g);
         const pathMatches = responseText.matchAll(/\/(?:Users|home)\/[^\s`]+/g);
+        const importanceLevel = normalizePriorityLevel(t.importance, 'medium');
+        const urgencyLevel = normalizePriorityLevel(t.urgency, 'medium');
+        const priorityBadges = `${renderPriorityBadge('importance', importanceLevel)}${renderPriorityBadge('urgency', urgencyLevel)}`;
         const items = [];
+
+        if (s === 'pending') {
+          items.push(`<span class="tb-meta-item" data-action="start-now" title="このタスクをすぐに実行" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;padding:4px 8px;border-radius:999px;background:rgba(74,158,255,0.18);border:1px solid rgba(74,158,255,0.35);transition:background 0.2s;">
+            <svg width="16" height="16" viewBox="0 0 24 24" class="tb-meta-icon" aria-hidden="true" style="color:#4a9eff;"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+            <span>今すぐ実行</span>
+          </span>`);
+        }
 
         if (isExternal && activeTerminal && activeTerminal.sessionId) {
           const terminalLabel = activeTerminal.app ? String(activeTerminal.app) : 'ターミナル';
@@ -4410,7 +5006,7 @@ async function initDocMenuTable() {
           return state.modelOptions[0] || null;
         })();
         const modelBadge = chosenModel
-          ? `<span class="tb-model-pill" data-model="${escapeHtml(chosenModel.id)}">@${escapeHtml(chosenModel.shortLabel || chosenModel.label || chosenModel.id)}</span>`
+          ? `<span class="tb-model-pill" data-model="${escapeHtml(chosenModel.id)}">${escapeHtml(chosenModel.shortLabel || chosenModel.label || chosenModel.id)}</span>`
           : '';
 
         const manualToggleLabel = summaryPending
@@ -4418,7 +5014,7 @@ async function initDocMenuTable() {
           : manualDone
               ? '完了済み（クリックで未完了に戻す）'
               : (isExternal
-                  ? '@Codex+terminalのセッションを終了して完了にします'
+                  ? 'Codex+terminal セッションを終了して完了にします'
                   : '手動で完了にします');
         const manualToggleText = summaryPending
           ? '要約取得中...'
@@ -4509,26 +5105,27 @@ async function initDocMenuTable() {
         } else if (s === 'codex-idle') {
           statusText = 'Codex監視を停止しました。必要であれば「監視再開」を押してください。';
         } else if (isExternal && !isCodex) {
-          // Codex以外の外部ターミナルの場合のみ表示
           const terminalLabel = activeTerminal && activeTerminal.app ? activeTerminal.app : 'ターミナル';
-          statusText = `${terminalLabel} で操作中`;
+          statusText = `${terminalLabel}操作中`;
+        } else if (s === 'pending') {
+          statusText = '保留中';
         } else if (showProgress) {
           if (elapsed < 60000) {
-            statusText = 'プロンプトを強化しています...';
+            statusText = '準備中';
           } else if (elapsed < 180000) {
-            statusText = '生成中です...';
+            statusText = '生成中';
           } else {
-            statusText = '処理に時間がかかっています...';
+            statusText = '長時間処理中';
           }
         } else if (!items.length) {
           statusText = t.error ? String(t.error) : s;
         }
 
         if (summaryPending) {
-          statusText = '完了まとめを取得中です...';
+          statusText = '完了まとめ取得中';
         }
         if (manualDone) {
-          statusText = '手動で完了済み';
+          statusText = '手動完了';
         }
 
         const serverIdAttr = t.serverId ? escapeHtml(String(t.serverId)) : '';
@@ -4540,9 +5137,9 @@ async function initDocMenuTable() {
               <span class="i">${icon}</span>
             </button>
             <div class="task-text">
-              <div class="task-title-row" data-action="open">
+            <div class="task-title-row" data-action="open">
                 <span class="task-title-text" title="${titleAttr}">${titleHtml}</span>
-                ${modelBadge}${manualToggle}
+                ${modelBadge}<span class="tb-priority-wrap">${priorityBadges}</span>${manualToggle}
               </div>
               ${startedAt ? `<div class="tb-timestamp">開始: ${escapeHtml(startedAt)}${finishedAt ? ` / 更新: ${escapeHtml(finishedAt)}` : ''}</div>` : ''}
               <div class="tb-meta" style="font-size:.75rem;color:var(--text-weak);margin-top:3px;">
@@ -4563,11 +5160,13 @@ async function initDocMenuTable() {
       }).join('');
 
       let finalHtml = '';
-      if (filterNotice) finalHtml += filterNotice;
+      if (noticeHtml) finalHtml += noticeHtml;
       if (tasksToRender.length) {
         finalHtml += cardsHtml;
       } else if (state.heatmapSelection) {
         finalHtml += '<div class="tb-empty">選択した時間帯に一致するタスクが見つかりません。ヒートマップをクリックし直すか、フィルターを解除してください。</div>';
+      } else if (state.matrixSelection) {
+        finalHtml += '<div class="tb-empty">該当するタスクがありません。別のマトリクスセルを選択してください。</div>';
       } else {
         finalHtml += '<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>';
       }
@@ -4575,6 +5174,7 @@ async function initDocMenuTable() {
       listEl.innerHTML = finalHtml;
 
       renderHeatmap();
+      renderPriorityMatrix();
 
       listEl.querySelectorAll('[data-action="clear-heatmap-filter"]').forEach(btn => {
         if (btn.dataset.bound === '1') return;
@@ -4582,6 +5182,14 @@ async function initDocMenuTable() {
         btn.addEventListener('click', (e) => {
           e.preventDefault();
           clearHeatmapSelection();
+        });
+      });
+      listEl.querySelectorAll('[data-action="clear-matrix-filter"]').forEach(btn => {
+        if (btn.dataset.bound === '1') return;
+        btn.dataset.bound = '1';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          clearMatrixSelection();
         });
       });
 
@@ -4795,7 +5403,16 @@ async function initDocMenuTable() {
 
     toggleBtn.addEventListener('click', () => setOpen(!state.open));
     hideEl?.addEventListener('click', () => setOpen(false));
-    sendEl?.addEventListener('click', () => { const v = inputEl?.value; if (inputEl) inputEl.value=''; submitRemoteTask(v); });
+    runEl?.addEventListener('click', () => {
+      const v = inputEl?.value;
+      if (inputEl) inputEl.value = '';
+      submitRemoteTask(v);
+    });
+    holdEl?.addEventListener('click', () => {
+      const v = inputEl?.value;
+      if (inputEl) inputEl.value = '';
+      createPendingTask(v);
+    });
     panel.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;
       if (!panel.contains(e.target)) return;
@@ -4921,6 +5538,16 @@ async function initDocMenuTable() {
             const sessionId = encodedSession && encodedSession.trim() ? encodedSession.trim() : null;
             if (sessionId) {
               await focusExternalTerminalTask(task);
+            }
+            return;
+          }
+          if (action === 'start-now') {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+              await submitRemoteTask(null, { existingTask: task });
+            } catch (err) {
+              console.error('Failed to execute pending task', err);
             }
             return;
           }
@@ -5197,6 +5824,67 @@ async function initDocMenuTable() {
     
     // 初回は即座に実行
     setTimeout(updateCodexTaskStatuses, 100);
+    
+    // グローバルに復旧用関数を公開（コンソールから実行可能）
+    window.kamuiTaskBoardRecover = function() {
+      const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
+      if (!backup) {
+        console.error('バックアップデータが見つかりません');
+        return false;
+      }
+      try {
+        const backupData = JSON.parse(backup);
+        console.log(`バックアップデータ: ${backupData.tasks?.length || 0}個のタスク`);
+        console.log('バックアップ時刻:', backupData.persistedAt);
+        if (confirm('バックアップからタスクを復元しますか？現在のデータは上書きされます。')) {
+          localStorage.setItem(STORAGE_KEY, backup);
+          location.reload();
+          return true;
+        }
+      } catch (err) {
+        console.error('バックアップデータの解析に失敗:', err);
+      }
+      return false;
+    };
+    
+    // 現在のデータを確認する関数も公開
+    window.kamuiTaskBoardStatus = function() {
+      const current = localStorage.getItem(STORAGE_KEY);
+      const backup = localStorage.getItem(STORAGE_BACKUP_KEY);
+      
+      console.log('=== タスクボード ストレージ状態 ===');
+      
+      if (current) {
+        try {
+          const currentData = JSON.parse(current);
+          console.log('現在のデータ:');
+          console.log(`  - タスク数: ${currentData.tasks?.length || 0}`);
+          console.log(`  - 保存時刻: ${currentData.persistedAt || '不明'}`);
+          console.log(`  - バージョン: ${currentData.version || '不明'}`);
+        } catch (err) {
+          console.error('現在のデータ解析エラー:', err);
+        }
+      } else {
+        console.log('現在のデータ: なし');
+      }
+      
+      if (backup) {
+        try {
+          const backupData = JSON.parse(backup);
+          console.log('\nバックアップデータ:');
+          console.log(`  - タスク数: ${backupData.tasks?.length || 0}`);
+          console.log(`  - 保存時刻: ${backupData.persistedAt || '不明'}`);
+          console.log(`  - バージョン: ${backupData.version || '不明'}`);
+        } catch (err) {
+          console.error('バックアップデータ解析エラー:', err);
+        }
+      } else {
+        console.log('\nバックアップデータ: なし');
+      }
+      
+      console.log('\n復元するには: window.kamuiTaskBoardRecover()');
+    };
+    
   } catch(err) {
     console.error('TaskBoard init failed', err);
   }
