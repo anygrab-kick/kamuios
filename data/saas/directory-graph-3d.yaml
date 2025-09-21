@@ -2,7 +2,7 @@
 # ディレクトリ構造を3Dネットワークで可視化
 
 - id: directory-graph-3d
-  category: 9
+  category: 1
   category_name: 3Dエディター
   title: Directory Graph 3D
   content: ""

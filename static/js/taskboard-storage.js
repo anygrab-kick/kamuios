@@ -69,6 +69,17 @@
           persistedAt: new Date().toISOString()
         };
         
+        // 空配列で過去の非空スナップショットを潰さない
+        try {
+          const prev = current ? JSON.parse(current) : null;
+          const prevLen = Array.isArray(prev && prev.tasks) ? prev.tasks.length : 0;
+          const nextLen = Array.isArray(payload && payload.tasks) ? payload.tasks.length : 0;
+          if (nextLen === 0 && prevLen > 0) {
+            console.warn('[TaskBoardStorage] Skip save: avoid overwriting non-empty snapshot with empty list');
+            return prev && prev.persistedAt ? prev.persistedAt : null;
+          }
+        } catch(_) {}
+
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
         console.log('[TaskBoardStorage] Data saved successfully');
         return payload.persistedAt;

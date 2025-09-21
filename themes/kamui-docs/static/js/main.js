@@ -3066,6 +3066,15 @@ async function initDocMenuTable() {
       function persistNow(){
         try {
           const prepared = state.tasks.slice(0, MAX_TASK_HISTORY).map(cloneTaskForStorage).filter(Boolean);
+          // HMR/リロード直後に空配列で上書きしないためのフェイルセーフ
+          try {
+            const prev = storageModule.load();
+            const prevTasksLen = Array.isArray(prev && prev.tasks) ? prev.tasks.length : 0;
+            if (prepared.length === 0 && prevTasksLen > 0) {
+              console.warn('[TaskBoard] Skip persist: avoid overwriting non-empty snapshot with empty list');
+              return;
+            }
+          } catch(_) {}
           const keepKeys = new Set(prepared.map(task => (task.serverId ? String(task.serverId) : String(task.id))).filter(Boolean));
           const logsPayload = {};
           keepKeys.forEach(key => {
@@ -3074,10 +3083,11 @@ async function initDocMenuTable() {
               logsPayload[key] = value.length > MAX_LOG_LENGTH ? value.slice(-MAX_LOG_LENGTH) : value;
             }
           });
+          // ログは別キーに保存してサイズ超過を避ける
+          try { storageModule.saveTaskLogs(logsPayload); } catch(_) {}
           const payload = {
             open: !!state.open,
             tasks: prepared,
-            logs: logsPayload,
             backendBase: state.backendBase,
             activeModelId: state.activeModelId,
             backendSnapshotAt: state.backendSnapshotAt,
@@ -3157,11 +3167,13 @@ async function initDocMenuTable() {
               state.tasks.forEach(ensureCodexMonitorState);
             }
           }
-          if (saved.logs && typeof saved.logs === 'object') {
-            Object.entries(saved.logs).forEach(([key, value]) => {
+          // ログは分離キーから取り出す
+          try {
+            const loadedLogs = storageModule.loadTaskLogs();
+            Object.entries(loadedLogs || {}).forEach(([key, value]) => {
               if (typeof value === 'string') taskLogsCache[key] = value;
             });
-          }
+          } catch(_) {}
           if (typeof saved.heatmapCollapsed === 'boolean') {
             state.heatmapCollapsed = saved.heatmapCollapsed;
           }
