@@ -1706,6 +1706,7 @@ async function initDocMenuTable() {
         matrixSelection: null,
         graph3dCollapsed: true,
         graph3dViewMode: 'media',
+        graph3dInfoCollapsed: true,
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
@@ -1738,6 +1739,7 @@ async function initDocMenuTable() {
         doc: 'ドキュメント',
         other: 'その他'
       };
+      const GRAPH3D_SEARCH_LIMIT = 50;
       const externalScriptPromises = Object.create(null);
       let graph3dInstance = null;
       let graph3dDataCache = null;
@@ -1749,10 +1751,23 @@ async function initDocMenuTable() {
       let graph3dContextMenu = null;
       let graph3dModeMediaEl = null;
       let graph3dModeColorEl = null;
+      let graph3dSearchInputEl = null;
+      let graph3dSearchCountEl = null;
+      let graph3dSearchResultsEl = null;
+      let graph3dSearchMatches = [];
+      let graph3dSearchMatchesTotal = 0;
+      let graph3dSearchActiveIndex = -1;
+      let graph3dSideEl = null;
+      let graph3dInfoToggleEl = null;
+      let graph3dInfoLabelEl = null;
+      let graph3dInfoResizeBound = false;
       let graph3dSphereGeometry = null;
       let graph3dNodeObjectCache = new Map();
       let graph3dVideoResources = new Map();
       let graph3dActiveVideoKey = null;
+      let graph3dLastCanvasSize = { width: 0, height: 0 };
+      let graph3dHasInitialFit = false;
+      let graph3dAutoFitLocked = false;
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -3167,6 +3182,7 @@ async function initDocMenuTable() {
             } : null,
             graph3dCollapsed: !!state.graph3dCollapsed,
             graph3dViewMode: state.graph3dViewMode,
+            graph3dInfoCollapsed: !!state.graph3dInfoCollapsed,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3209,6 +3225,9 @@ async function initDocMenuTable() {
           }
           if (typeof saved.graph3dViewMode === 'string') {
             state.graph3dViewMode = normalizeGraph3dViewMode(saved.graph3dViewMode);
+          }
+          if (typeof saved.graph3dInfoCollapsed === 'boolean') {
+            state.graph3dInfoCollapsed = saved.graph3dInfoCollapsed;
           }
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
@@ -3478,9 +3497,18 @@ async function initDocMenuTable() {
         <div class="taskboard-3d" id="taskboard3d" role="region" aria-label="システムディレクトリ3Dビュー">
           <div class="tb-3d-wrapper">
             <div class="tb-3d-canvas" id="taskboard3dCanvas" aria-live="polite">
+              <div class="tb-3d-search" id="taskboard3dSearchPanel" role="search">
+                <input type="search" id="taskboard3dSearch" class="tb-3d-search-input" placeholder="ファイル・パスを検索" autocomplete="off" spellcheck="false" aria-controls="taskboard3dSearchResults" aria-haspopup="listbox" aria-expanded="false" aria-label="ファイル検索" />
+                <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
+                <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
+              </div>
               <div class="tb-3d-placeholder" id="taskboard3dStatus">3Dビューは未読み込みです。</div>
             </div>
-            <div class="tb-3d-side">
+            <button type="button" id="taskboard3dInfoToggle" class="tb-3d-info-toggle" aria-expanded="false" aria-controls="taskboard3dInfoPanel" aria-label="info">
+              <span class="tb-3d-info-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.25"></rect><path d="M7.25 3.75v12.5"></path></svg></span>
+              <span class="tb-3d-info-text">info</span>
+            </button>
+            <div class="tb-3d-side" id="taskboard3dInfoPanel">
               <div class="tb-3d-side-header">
                 <h3 class="tb-3d-title">ノード情報</h3>
                 <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み">再読み込み</button>
@@ -3560,8 +3588,22 @@ async function initDocMenuTable() {
     const graph3dBaseEl = panel.querySelector('#taskboard3dBase');
     const graph3dStatsEl = panel.querySelector('#taskboard3dStats');
     const graph3dReloadEl = panel.querySelector('#taskboard3dReload');
+    graph3dSideEl = panel.querySelector('#taskboard3dInfoPanel');
+    graph3dInfoToggleEl = panel.querySelector('#taskboard3dInfoToggle');
+    graph3dInfoLabelEl = graph3dInfoToggleEl ? graph3dInfoToggleEl.querySelector('.tb-3d-info-text') : null;
     graph3dModeMediaEl = panel.querySelector('#taskboard3dModeMedia');
     graph3dModeColorEl = panel.querySelector('#taskboard3dModeColor');
+    graph3dSearchInputEl = panel.querySelector('#taskboard3dSearch');
+    graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
+    graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
+    initializeGraph3dSearchUI();
+    bindGraph3dSearchEvents();
+    updateGraph3dInfoVisibility();
+    if (!graph3dInfoResizeBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      const resizeHandler = () => requestAnimationFrame(updateGraph3dInfoVisibility);
+      window.addEventListener('resize', resizeHandler);
+      graph3dInfoResizeBound = true;
+    }
     const analyticsEl = panel.querySelector('.taskboard-analytics');
     const inputEl = panel.querySelector('#taskboardInput');
     const importanceEl = panel.querySelector('#taskboardImportance');
@@ -4092,6 +4134,324 @@ async function initDocMenuTable() {
       }
     }
 
+    function getGraph3dNodeById(nodeId) {
+      if (nodeId == null || !graph3dInstance || typeof graph3dInstance.graphData !== 'function') return null;
+      const data = graph3dInstance.graphData();
+      if (!data || !Array.isArray(data.nodes)) return null;
+      return data.nodes.find((node) => node && node.id === nodeId) || null;
+    }
+
+    function moveCameraToGraph3dNode(node, duration = 600) {
+      if (!node || !graph3dInstance || typeof graph3dInstance.cameraPosition !== 'function') return;
+      try {
+        const camera = typeof graph3dInstance.camera === 'function' ? graph3dInstance.camera() : null;
+        const distance = 180;
+        const x = Number.isFinite(node.x) ? node.x : 0;
+        const y = Number.isFinite(node.y) ? node.y : 0;
+        const z = Number.isFinite(node.z) ? node.z : 0;
+        const length = Math.max(Math.hypot(x, y, z), 1);
+        const ratio = 1 + distance / length;
+        graph3dInstance.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, node, duration);
+        if (camera && typeof graph3dInstance.controls === 'function') {
+          const controls = graph3dInstance.controls();
+          if (controls && controls.target && typeof controls.target.set === 'function') {
+            controls.target.set(node.x || 0, node.y || 0, node.z || 0);
+            controls.update && controls.update();
+          }
+        }
+      } catch (_) {}
+    }
+
+    function focusGraph3dNode(node, duration = 600) {
+      if (!node) return false;
+      graph3dPinnedNode = node;
+      applyGraph3dInfo(node);
+      hideGraph3dContextMenu();
+      moveCameraToGraph3dNode(node, duration);
+      startGraph3dVideoForNode(node);
+      syncGraph3dSearchHighlightByNode(node);
+      return true;
+    }
+
+    function focusGraph3dNodeById(nodeId, duration = 600) {
+      const node = getGraph3dNodeById(nodeId);
+      if (!node) return false;
+      return focusGraph3dNode(node, duration);
+    }
+
+    function syncGraph3dSearchHighlightByNode(node) {
+      if (!graph3dSearchMatches.length) return;
+      if (!node || node.id == null) {
+        highlightGraph3dSearchResult(graph3dSearchActiveIndex, { scroll: false });
+        return;
+      }
+      const idx = graph3dSearchMatches.findIndex(match => match && match.id === node.id);
+      if (idx >= 0) {
+        graph3dSearchActiveIndex = idx;
+        highlightGraph3dSearchResult(idx, { scroll: true });
+      }
+    }
+
+    function renderGraph3dSearchMessage(message) {
+      if (!graph3dSearchResultsEl) return;
+      graph3dSearchResultsEl.innerHTML = message
+        ? `<li class="tb-3d-search-empty" role="presentation">${escapeHtml(message)}</li>`
+        : '';
+      graph3dSearchResultsEl.scrollTop = 0;
+      graph3dSearchMatches = [];
+      graph3dSearchMatchesTotal = 0;
+      graph3dSearchActiveIndex = -1;
+      if (graph3dSearchInputEl) {
+        graph3dSearchInputEl.removeAttribute('aria-activedescendant');
+        graph3dSearchInputEl.setAttribute('aria-expanded', 'false');
+      }
+    }
+
+    function initializeGraph3dSearchUI() {
+      if (graph3dSearchCountEl) graph3dSearchCountEl.textContent = '';
+      renderGraph3dSearchMessage('');
+      updateGraph3dSearchState();
+    }
+
+    function updateGraph3dSearchCount() {
+      if (!graph3dSearchCountEl) return;
+      const hasTerm = graph3dSearchInputEl && graph3dSearchInputEl.value && graph3dSearchInputEl.value.trim();
+      if (!hasTerm) {
+        graph3dSearchCountEl.textContent = '';
+        return;
+      }
+      if (graph3dLoadPromise) {
+        graph3dSearchCountEl.textContent = '...';
+        return;
+      }
+      if (!graph3dDataCache || !Array.isArray(graph3dDataCache.nodes) || !graph3dDataCache.nodes.length) {
+        graph3dSearchCountEl.textContent = '...';
+        return;
+      }
+      if (!graph3dSearchMatchesTotal) {
+        graph3dSearchCountEl.textContent = '0件';
+        return;
+      }
+      if (graph3dSearchMatchesTotal > graph3dSearchMatches.length) {
+        graph3dSearchCountEl.textContent = `${graph3dSearchMatches.length} / ${graph3dSearchMatchesTotal}件`;
+        return;
+      }
+      graph3dSearchCountEl.textContent = `${graph3dSearchMatchesTotal}件`;
+    }
+
+    function renderGraph3dSearchResults() {
+      if (!graph3dSearchResultsEl) return;
+      if (!graph3dSearchMatches.length) {
+        renderGraph3dSearchMessage('一致するノードが見つかりません。');
+        updateGraph3dSearchCount();
+        return;
+      }
+      const items = graph3dSearchMatches.map((node, idx) => {
+        const isActive = idx === graph3dSearchActiveIndex;
+        const optionId = `taskboard3dSearchOption-${idx}`;
+        const displayPath = node.type === 'root'
+          ? (graph3dDataCache?.baseDir || node.path || node.name || '')
+          : (node.path || node.name || '');
+        const shownPath = displayPath ? escapeHtml(displayPath) : '(パスなし)';
+        const classes = ['tb-3d-search-item-btn'];
+        if (isActive) classes.push('is-active');
+        return `<li class="tb-3d-search-item" role="option" data-index="${idx}"><button type="button" class="${classes.join(' ')}" data-index="${idx}" data-node-id="${escapeAttr(String(node.id))}" id="${optionId}" aria-selected="${isActive ? 'true' : 'false'}"><span class="tb-3d-search-item-path">${shownPath}</span></button></li>`;
+      });
+      graph3dSearchResultsEl.innerHTML = items.join('');
+      if (graph3dSearchInputEl) {
+        const activeId = graph3dSearchActiveIndex >= 0 ? `taskboard3dSearchOption-${graph3dSearchActiveIndex}` : '';
+        if (activeId) {
+          graph3dSearchInputEl.setAttribute('aria-activedescendant', activeId);
+        } else {
+          graph3dSearchInputEl.removeAttribute('aria-activedescendant');
+        }
+        graph3dSearchInputEl.setAttribute('aria-expanded', graph3dSearchMatches.length ? 'true' : 'false');
+      }
+      updateGraph3dSearchCount();
+    }
+
+    function highlightGraph3dSearchResult(nextIndex, options = {}) {
+      if (!graph3dSearchResultsEl || !graph3dSearchMatches.length) return;
+      const clamped = Math.max(0, Math.min(nextIndex, graph3dSearchMatches.length - 1));
+      graph3dSearchActiveIndex = clamped;
+      const buttons = graph3dSearchResultsEl.querySelectorAll('.tb-3d-search-item-btn');
+      buttons.forEach((btn) => {
+        const idx = Number(btn.dataset.index);
+        const isActive = idx === clamped;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        if (isActive && btn.id && graph3dSearchInputEl) {
+          graph3dSearchInputEl.setAttribute('aria-activedescendant', btn.id);
+        }
+        if (!isActive && graph3dSearchInputEl && graph3dSearchInputEl.getAttribute('aria-activedescendant') === btn.id) {
+          graph3dSearchInputEl.removeAttribute('aria-activedescendant');
+        }
+        if (isActive && options.scroll !== false) {
+          const container = btn.closest('.tb-3d-search-item');
+          if (container && typeof container.scrollIntoView === 'function') {
+            container.scrollIntoView({ block: 'nearest' });
+          }
+        }
+      });
+    }
+
+    function activateGraph3dSearchResult(index) {
+      if (!graph3dSearchMatches.length) return;
+      const normalized = Math.max(0, Math.min(index, graph3dSearchMatches.length - 1));
+      const target = graph3dSearchMatches[normalized];
+      if (!target) return;
+      highlightGraph3dSearchResult(normalized, { scroll: true });
+      const focus = () => {
+        if (!focusGraph3dNodeById(target.id)) {
+          focusGraph3dNode(target);
+        }
+      };
+      if (!graph3dInstance) {
+        const promise = ensureGraph3dInitialized().catch(() => null);
+        if (promise && typeof promise.then === 'function') {
+          promise.then(() => focus());
+        }
+      } else {
+        focus();
+      }
+    }
+
+    function updateGraph3dSearchResults(rawTerm, options = {}) {
+      const term = typeof rawTerm === 'string' ? rawTerm.trim() : '';
+      if (!graph3dSearchResultsEl) return;
+      if (!term) {
+        renderGraph3dSearchMessage('');
+        updateGraph3dSearchCount();
+        return;
+      }
+      if (!graph3dDataCache || !Array.isArray(graph3dDataCache.nodes) || !graph3dDataCache.nodes.length) {
+        renderGraph3dSearchMessage('3Dデータを読み込み中です...');
+        updateGraph3dSearchCount();
+        return;
+      }
+      const lower = term.toLowerCase();
+      const allMatches = graph3dDataCache.nodes.filter((node) => {
+        if (!node || typeof node !== 'object') return false;
+        if (node.id == null) return false;
+        const name = node.name ? String(node.name).toLowerCase() : '';
+        const path = node.path ? String(node.path).toLowerCase() : '';
+        return name.includes(lower) || path.includes(lower);
+      });
+      graph3dSearchMatchesTotal = allMatches.length;
+      graph3dSearchMatches = allMatches.slice(0, GRAPH3D_SEARCH_LIMIT);
+      if (!graph3dSearchMatches.length) {
+        renderGraph3dSearchMessage('一致するノードが見つかりません。');
+        updateGraph3dSearchCount();
+        return;
+      }
+      const keepIndex = options && options.keepIndex === true;
+      if (!keepIndex || graph3dSearchActiveIndex < 0 || graph3dSearchActiveIndex >= graph3dSearchMatches.length) {
+        graph3dSearchActiveIndex = 0;
+        if (graph3dSearchResultsEl) graph3dSearchResultsEl.scrollTop = 0;
+      }
+      renderGraph3dSearchResults();
+      if (graph3dSearchMatches.length) {
+        highlightGraph3dSearchResult(graph3dSearchActiveIndex, { scroll: false });
+      }
+    }
+
+    function refreshGraph3dSearchResults(options = {}) {
+      if (!graph3dSearchInputEl) return;
+      const term = graph3dSearchInputEl.value && graph3dSearchInputEl.value.trim();
+      if (term) {
+        updateGraph3dSearchResults(term, options);
+      } else {
+        renderGraph3dSearchMessage('');
+        updateGraph3dSearchCount();
+      }
+    }
+
+    function updateGraph3dSearchState() {
+      if (!graph3dSearchInputEl) return;
+      const collapsed = !!state.graph3dCollapsed;
+      graph3dSearchInputEl.disabled = collapsed;
+      graph3dSearchInputEl.setAttribute('aria-disabled', collapsed ? 'true' : 'false');
+      if (collapsed) {
+        renderGraph3dSearchMessage('');
+        updateGraph3dSearchCount();
+      } else {
+        refreshGraph3dSearchResults({ keepIndex: true });
+      }
+    }
+
+    function handleGraph3dSearchInput(event) {
+      const value = event && event.target ? event.target.value : '';
+      graph3dSearchActiveIndex = 0;
+      updateGraph3dSearchResults(value);
+    }
+
+    function handleGraph3dSearchKeyDown(event) {
+      if (!graph3dSearchInputEl) return;
+      const key = event.key;
+      if (key === 'ArrowDown') {
+        if (!graph3dSearchMatches.length) return;
+        event.preventDefault();
+        const next = graph3dSearchActiveIndex + 1;
+        highlightGraph3dSearchResult(next >= graph3dSearchMatches.length ? 0 : next);
+        return;
+      }
+      if (key === 'ArrowUp') {
+        if (!graph3dSearchMatches.length) return;
+        event.preventDefault();
+        const prev = graph3dSearchActiveIndex - 1;
+        const nextIndex = prev < 0 ? graph3dSearchMatches.length - 1 : prev;
+        highlightGraph3dSearchResult(nextIndex);
+        return;
+      }
+      if (key === 'Enter') {
+        if (!graph3dSearchMatches.length) return;
+        event.preventDefault();
+        activateGraph3dSearchResult(graph3dSearchActiveIndex >= 0 ? graph3dSearchActiveIndex : 0);
+        return;
+      }
+      if (key === 'Escape') {
+        if (!graph3dSearchInputEl.value) return;
+        event.preventDefault();
+        graph3dSearchInputEl.value = '';
+        graph3dSearchActiveIndex = -1;
+        renderGraph3dSearchMessage('');
+        updateGraph3dSearchCount();
+      }
+    }
+
+    function handleGraph3dSearchResultsClick(event) {
+      const button = event.target && event.target.closest ? event.target.closest('.tb-3d-search-item-btn') : null;
+      if (!button) return;
+      const index = Number(button.dataset.index);
+      if (!Number.isFinite(index) || index < 0) return;
+      activateGraph3dSearchResult(index);
+      if (graph3dSearchInputEl) {
+        graph3dSearchInputEl.focus();
+      }
+    }
+
+    function handleGraph3dSearchResultsPointerMove(event) {
+      const item = event.target && event.target.closest ? event.target.closest('.tb-3d-search-item-btn') : null;
+      if (!item) return;
+      const index = Number(item.dataset.index);
+      if (!Number.isFinite(index) || index < 0) return;
+      if (graph3dSearchActiveIndex === index) return;
+      highlightGraph3dSearchResult(index, { scroll: false });
+    }
+
+    function bindGraph3dSearchEvents() {
+      if (graph3dSearchInputEl && !graph3dSearchInputEl._tbGraphBound) {
+        graph3dSearchInputEl.addEventListener('input', handleGraph3dSearchInput);
+        graph3dSearchInputEl.addEventListener('keydown', handleGraph3dSearchKeyDown);
+        graph3dSearchInputEl._tbGraphBound = true;
+      }
+      if (graph3dSearchResultsEl && !graph3dSearchResultsEl._tbGraphBound) {
+        graph3dSearchResultsEl.addEventListener('click', handleGraph3dSearchResultsClick);
+        graph3dSearchResultsEl.addEventListener('pointermove', handleGraph3dSearchResultsPointerMove);
+        graph3dSearchResultsEl._tbGraphBound = true;
+      }
+    }
+
     function updateGraph3dStats(stats, totals) {
       if (!graph3dStatsEl) return;
       if (!stats) {
@@ -4161,6 +4521,16 @@ async function initDocMenuTable() {
       const Graph = graphInitializer(container);
       if (!Graph) return;
       graph3dInstance = Graph;
+      graph3dAutoFitLocked = false;
+      graph3dHasInitialFit = false;
+      try {
+        const controls = Graph.controls && Graph.controls();
+        if (controls && typeof controls.addEventListener === 'function') {
+          controls.addEventListener('start', () => {
+            graph3dAutoFitLocked = true;
+          }, { once: true });
+        }
+      } catch (_) {}
       try {
         if (graph3dResizeObserver && typeof graph3dResizeObserver.disconnect === 'function') {
           graph3dResizeObserver.disconnect();
@@ -4203,6 +4573,8 @@ async function initDocMenuTable() {
           graph3dPinnedNode = node;
           applyGraph3dInfo(node);
         }
+        syncGraph3dSearchHighlightByNode(node);
+        graph3dAutoFitLocked = true;
         const camera = Graph.camera();
         if (!camera) return;
         const distance = 180;
@@ -4234,6 +4606,7 @@ async function initDocMenuTable() {
           applyGraph3dInfo(null);
           hideGraph3dContextMenu();
           stopGraph3dActiveVideo();
+          syncGraph3dSearchHighlightByNode(null);
         });
       }
 
@@ -4247,6 +4620,7 @@ async function initDocMenuTable() {
       }
       graph3dMediaTexturePromises.clear();
       refreshGraph3dNodeObjects({ force: true });
+      refreshGraph3dSearchResults({ keepIndex: true });
 
       try {
         Graph.d3Force('link').distance(48);
@@ -4254,7 +4628,8 @@ async function initDocMenuTable() {
       } catch (_) {}
 
       let graphFitTimer = null;
-      const attemptFit = (delay = 0) => {
+      const attemptFit = (delay = 0, { force = false } = {}) => {
+        if (graph3dAutoFitLocked && !force) return;
         if (graphFitTimer) {
           clearTimeout(graphFitTimer);
           graphFitTimer = null;
@@ -4270,18 +4645,36 @@ async function initDocMenuTable() {
             }
             Graph.cameraPosition({ x: 0, y: 0, z: 900 }, { x: 0, y: 0, z: 0 }, 0);
             Graph.zoomToFit(600, 120);
+            graph3dHasInitialFit = true;
           } catch (_) {}
         }, delay);
       };
 
+      const clearGraph3dCanvasInlineSize = () => {
+        if (!graph3dCanvasContainer) return;
+        graph3dCanvasContainer.style.removeProperty('width');
+        graph3dCanvasContainer.style.removeProperty('height');
+      };
+
       const applyGraphDimensions = (width, height, triggerFit = false) => {
         if (!graph3dInstance) return;
-        let w = width;
-        let h = height;
-        if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
+        clearGraph3dCanvasInlineSize();
+        let w = Number.isFinite(Number(width)) ? Number(width) : 0;
+        let h = Number.isFinite(Number(height)) ? Number(height) : 0;
+        if ((!w || w <= 0 || !h || h <= 0) && graph3dCanvasEl) {
           const rect = graph3dCanvasEl.getBoundingClientRect();
-          w = rect.width;
-          h = rect.height;
+          if (!w || w <= 0) {
+            w = rect?.width || graph3dCanvasEl.clientWidth || graph3dCanvasEl.offsetWidth || 0;
+          }
+          if (!h || h <= 0) {
+            h = rect?.height || graph3dCanvasEl.clientHeight || graph3dCanvasEl.offsetHeight || 0;
+          }
+        }
+        if ((!w || w <= 0) && graph3dLastCanvasSize.width > 0) {
+          w = graph3dLastCanvasSize.width;
+        }
+        if ((!h || h <= 0) && graph3dLastCanvasSize.height > 0) {
+          h = graph3dLastCanvasSize.height;
         }
         const safeWidth = Math.max(160, Math.floor(w || 0));
         const safeHeight = Math.max(160, Math.floor(h || 0));
@@ -4291,6 +4684,13 @@ async function initDocMenuTable() {
         if (typeof graph3dInstance.height === 'function') {
           graph3dInstance.height(safeHeight);
         }
+        if (safeWidth > 160) {
+          graph3dLastCanvasSize.width = safeWidth;
+        }
+        if (safeHeight > 160) {
+          graph3dLastCanvasSize.height = safeHeight;
+        }
+        clearGraph3dCanvasInlineSize();
         if (triggerFit) attemptFit(200);
       };
 
@@ -4309,12 +4709,7 @@ async function initDocMenuTable() {
             renderer.toneMappingExposure = 1.25;
           }
         }
-        attemptFit(400);
-        if (typeof Graph.onEngineStop === 'function') {
-          Graph.onEngineStop(() => {
-            attemptFit(0);
-          });
-        }
+        attemptFit(400, { force: true });
         if (typeof ResizeObserver !== 'undefined') {
           graph3dResizeObserver = new ResizeObserver((entries) => {
             for (const entry of entries) {
@@ -4352,6 +4747,10 @@ async function initDocMenuTable() {
           graph3dReloadEl.classList.add('is-loading');
         }
         graph3dPinnedNode = null;
+        if (graph3dSearchInputEl && graph3dSearchInputEl.value && graph3dSearchInputEl.value.trim()) {
+          renderGraph3dSearchMessage('3Dデータを解析中です...');
+          updateGraph3dSearchCount();
+        }
         try {
           const ForceGraphFactory = await ensureForceGraphLibrary();
           const base = await probeBackendBase();
@@ -4396,9 +4795,48 @@ async function initDocMenuTable() {
       graph3dToggleEl.classList.toggle('is-active', !state.graph3dCollapsed);
     }
 
+    function updateGraph3dInfoVisibility() {
+      if (!graph3dInfoToggleEl) return;
+      const collapsed = !!state.graph3dInfoCollapsed;
+      if (graph3dSideEl) {
+        graph3dSideEl.classList.toggle('is-collapsed', collapsed);
+      }
+      const label = collapsed ? 'info' : 'ノード情報を隠す';
+      graph3dInfoToggleEl.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      graph3dInfoToggleEl.setAttribute('aria-label', label);
+      graph3dInfoToggleEl.title = label;
+      graph3dInfoToggleEl.classList.toggle('is-active', !collapsed);
+      graph3dInfoToggleEl.disabled = !!state.graph3dCollapsed;
+      graph3dInfoToggleEl.setAttribute('aria-disabled', state.graph3dCollapsed ? 'true' : 'false');
+      if (graph3dInfoLabelEl) {
+        graph3dInfoLabelEl.textContent = label;
+      }
+      const shouldOffset = !collapsed && !state.graph3dCollapsed && graph3dSideEl
+        && typeof graph3dSideEl.getBoundingClientRect === 'function';
+      if (shouldOffset) {
+        let isNarrow = false;
+        try {
+          isNarrow = typeof window !== 'undefined'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia('(max-width: 900px)').matches;
+        } catch (_) {}
+        if (isNarrow) {
+          graph3dInfoToggleEl.style.transform = '';
+        } else {
+          const rect = graph3dSideEl.getBoundingClientRect();
+          const offset = rect && rect.width ? Math.max(0, Math.round(rect.width + 18)) : 0;
+          graph3dInfoToggleEl.style.transform = offset ? `translateX(-${offset}px)` : '';
+        }
+      } else {
+        graph3dInfoToggleEl.style.transform = '';
+      }
+    }
+
     function renderGraph3dPanel() {
       updateGraph3dToggleLabel();
       updateGraph3dModeToggle();
+      updateGraph3dInfoVisibility();
+      updateGraph3dSearchState();
       updateViewMode();
       if (state.graph3dCollapsed) {
         graph3dSetStatus('', 'info');
@@ -4424,6 +4862,14 @@ async function initDocMenuTable() {
         graph3dResizeObserver = null;
       }
       if (next) stopGraph3dActiveVideo();
+    }
+
+    function setGraph3dInfoCollapsed(nextValue) {
+      const next = !!nextValue;
+      if (state.graph3dInfoCollapsed === next) return;
+      state.graph3dInfoCollapsed = next;
+      updateGraph3dInfoVisibility();
+      schedulePersist();
     }
 
     // グラフ3Dコンテキストメニューを作成
@@ -4867,6 +5313,13 @@ async function initDocMenuTable() {
           setGraph3dCollapsed(false);
         }
         ensureGraph3dInitialized({ forceReload: true }).catch(() => {});
+      });
+    }
+    if (graph3dInfoToggleEl) {
+      graph3dInfoToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (graph3dInfoToggleEl.disabled) return;
+        setGraph3dInfoCollapsed(!state.graph3dInfoCollapsed);
       });
     }
     if (graph3dModeMediaEl) {
