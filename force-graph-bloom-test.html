@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style> 
+    body { 
+      margin: 0; 
+      font-family: sans-serif;
+    } 
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+      z-index: 100;
+    }
+  </style>
+
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
+  
+  <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+  
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+  <div id="info">
+    Force-Graph-3D + Bloom Effect<br>
+    マウスで回転・ズーム可能<br>
+    <span id="status">Loading...</span>
+  </div>
+  <div id="3d-graph"></div>
+
+  <script type="module">
+    import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+    import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js';
+
+    const statusEl = document.getElementById('status');
+
+    // ForceGraph3Dの読み込みを待つ
+    function waitForLibrary() {
+      return new Promise((resolve) => {
+        const check = () => {
+          if (window.ForceGraph3D) {
+            resolve();
+          } else {
+            setTimeout(check, 50);
+          }
+        };
+        check();
+      });
+    }
+
+    async function init() {
+      await waitForLibrary();
+      
+      statusEl.textContent = 'Initializing graph...';
+
+      // サンプルデータを生成
+      const N = 300;
+      const gData = {
+        nodes: [...Array(N).keys()].map(i => ({ 
+          id: i,
+          group: Math.ceil(Math.random() * 8),
+          val: Math.random() * 20
+        })),
+        links: [...Array(N).keys()]
+          .filter(id => id)
+          .map(id => ({
+            source: id,
+            target: Math.round(Math.random() * (id-1))
+          }))
+      };
+
+      // グラフを初期化（window.ForceGraph3Dを使用）
+      const elem = document.getElementById('3d-graph');
+      const Graph = window.ForceGraph3D()(elem)
+          .backgroundColor('#000003')
+          .graphData(gData)
+          .nodeLabel('id')
+          .nodeAutoColorBy('group')
+          .nodeVal('val')
+          .nodeOpacity(0.9)
+          .linkOpacity(0.2);
+
+      // レンダラーが準備できるまで待つ
+      setTimeout(() => {
+        try {
+          // Bloomエフェクトを設定
+          const bloomPass = new UnrealBloomPass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            0.66,  // strength
+            1,     // radius
+            0      // threshold
+          );
+          
+          // postProcessingを有効化してBloomを追加
+          Graph.postProcessingComposer().addPass(bloomPass);
+          
+          // レンダラーを取得
+          const renderer = Graph.renderer();
+          renderer.toneMappingExposure = 0.8322;
+          
+          // GUI設定
+          const gui = new GUI();
+          
+          // Controls folder
+          const controlsFolder = gui.addFolder('Controls');
+          controlsFolder.open();
+          
+          // Bloom folder
+          const bloomFolder = controlsFolder.addFolder('bloom');
+          bloomFolder.open();
+          
+          bloomFolder.add(bloomPass, 'threshold', 0.0, 1.0).name('threshold');
+          bloomFolder.add(bloomPass, 'strength', 0.0, 3.0).name('strength').setValue(0.66);
+          bloomFolder.add(bloomPass, 'radius', 0.0, 1.0).name('radius').setValue(1);
+          
+          // Tone mapping folder
+          const toneMappingFolder = controlsFolder.addFolder('tone mapping');
+          toneMappingFolder.open();
+          
+          toneMappingFolder.add(renderer, 'toneMappingExposure', 0.1, 2.0).name('exposure').setValue(0.8322);
+          
+          statusEl.textContent = 'Bloom enabled! Nodes: ' + N;
+          statusEl.style.color = '#4ade80';
+          console.log('Bloom pass added successfully');
+        } catch (error) {
+          statusEl.textContent = 'Error: ' + error.message;
+          statusEl.style.color = '#ef4444';
+          console.error('Failed to add bloom:', error);
+        }
+      }, 1000);
+
+      // ウィンドウリサイズ対応
+      window.addEventListener('resize', () => {
+        Graph.width(window.innerWidth).height(window.innerHeight);
+      });
+    }
+
+    // 初期化を実行
+    init().catch(error => {
+      statusEl.textContent = 'Init error: ' + error.message;
+      statusEl.style.color = '#ef4444';
+      console.error('Initialization failed:', error);
+    });
+  </script>
+</body>
+</html>

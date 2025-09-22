@@ -1706,6 +1706,7 @@ async function initDocMenuTable() {
         matrixSelection: null,
         graph3dCollapsed: true,
         graph3dViewMode: 'media',
+        graph3dDimInactive: true,
         graph3dInfoCollapsed: true,
         composeImportance: 'medium',
         composeUrgency: 'medium',
@@ -1765,9 +1766,33 @@ async function initDocMenuTable() {
       let graph3dNodeObjectCache = new Map();
       let graph3dVideoResources = new Map();
       let graph3dActiveVideoKey = null;
+      let graph3dNodesByPath = new Map();
+      let graph3dNodesByLowerPath = new Map();
+      let graph3dActiveTaskPaths = new Set();
+      let graph3dActiveHighlightNodeIds = new Set();
+      let graph3dHighlightMeshes = new Set();
+      let graph3dHighlightRafId = null;
+      let graph3dHighlightGeometry = null;
+      let graph3dHighlightSpriteTexture = null;
+      let graph3dIndexedBaseDir = null;
+      let graph3dRenderer = null;
+      let graph3dSceneLights = [];
+      let graph3dDimToggleEl = null;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
+      // Bloom関連の変数
+      let graph3dBloomComposer = null;
+      let graph3dFinalComposer = null;
+      let graph3dBloomPass = null;
+      let graph3dMixPass = null;
+      let graph3dBloomLayer = null;
+      let graph3dDarkMaterial = null;
+      let graph3dMaterialsCache = {};
+      const graph3dBloomImports = {
+        OutputPass: null,
+        ShaderPass: null
+      };
       const taskLogsCache = Object.create(null);
       let modelToggleEl = null;
       let syncStatusEl = null;
@@ -1780,6 +1805,22 @@ async function initDocMenuTable() {
       const HOURS_IN_DAY = 24;
       const HEATMAP_HOURS = Array.from({ length: HOURS_IN_DAY }, (_, i) => i);
       const TASK_TIMEZONE = 'Asia/Tokyo';
+      const GRAPH3D_BLOOM_DEFAULT = { strength: 1.5, radius: 0.5, threshold: 0.0 };
+      const GRAPH3D_BLOOM_HIGHLIGHT = { strength: 3.0, radius: 0.8, threshold: 0.0 };
+      const GRAPH3D_EXPOSURE_DEFAULT = 1.0;
+      const GRAPH3D_EXPOSURE_HIGHLIGHT = 1.2;
+      const GRAPH3D_ENTIRE_SCENE = 0;
+      const GRAPH3D_BLOOM_SCENE = 1;
+      const GRAPH3D_FOG_COLOR = '#050608';
+      const GRAPH3D_FOG_DENSITY = 0.00018;
+      const GRAPH3D_FOG_LINEAR = { near: 120, far: 2400 };
+      const GRAPH3D_CAMERA_LIMITS = {
+        near: 12,
+        far: 4200,
+        minDistance: 180,
+        maxDistance: 2400,
+        damping: 0.22
+      };
       const dayKeyFormatter = new Intl.DateTimeFormat('en-CA', {
         timeZone: TASK_TIMEZONE,
         year: 'numeric',
@@ -1850,6 +1891,436 @@ async function initDocMenuTable() {
         } catch (err) {
           const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
           return `${proto}//${window.location.host}${trimmedPath}`;
+        }
+      }
+
+      function normalizeFsPath(value) {
+        if (typeof value !== 'string') return '';
+        let normalized = value.trim().replace(/\\/g, '/');
+        if (!normalized) return '';
+        normalized = normalized.replace(/\/{2,}/g, '/');
+        return normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+      }
+
+      function normalizeRelativeGraphPath(value) {
+        let normalized = normalizeFsPath(value);
+        if (!normalized) return '';
+        normalized = normalized.replace(/^\.\/+/, '');
+        normalized = normalized.replace(/^\/+/, '');
+        return normalized;
+      }
+
+      function stripBaseDirFromPath(pathValue, baseValue) {
+        const normalizedPath = normalizeFsPath(pathValue);
+        const normalizedBase = normalizeFsPath(baseValue);
+        if (!normalizedPath || !normalizedBase) return normalizedPath;
+        const pathLower = normalizedPath.toLowerCase();
+        const baseLower = normalizedBase.toLowerCase();
+        if (pathLower === baseLower) return '';
+        if (pathLower.startsWith(baseLower)) {
+          const suffix = normalizedPath.slice(normalizedBase.length);
+          return suffix.replace(/^\/+/, '');
+        }
+        return normalizedPath;
+      }
+
+      function indexGraph3dNodePaths() {
+        graph3dNodesByPath.clear();
+        graph3dNodesByLowerPath.clear();
+        const nodes = Array.isArray(graph3dDataCache?.nodes) ? graph3dDataCache.nodes : [];
+        const baseDir = graph3dDataCache?.baseDir ? normalizeFsPath(graph3dDataCache.baseDir) : '';
+        graph3dIndexedBaseDir = baseDir || null;
+        nodes.forEach((node) => {
+          if (!node || typeof node !== 'object') return;
+          const entries = new Set();
+          if (node.type === 'root') {
+            if (baseDir) entries.add(baseDir);
+          }
+          if (typeof node.path === 'string' && node.path) {
+            const relative = normalizeRelativeGraphPath(node.path);
+            if (relative) entries.add(relative);
+            if (baseDir) entries.add(normalizeFsPath(`${baseDir}/${relative}`));
+          }
+          entries.forEach((key) => {
+            if (!key) return;
+            graph3dNodesByPath.set(key, node);
+            graph3dNodesByLowerPath.set(key.toLowerCase(), node);
+          });
+        });
+      }
+
+      function graph3dIsMediaMode() {
+        return normalizeGraph3dViewMode(state.graph3dViewMode) === 'media';
+      }
+
+      function graph3dIsMediaAsset(node) {
+        return !!(node && (node.type === 'image' || node.type === 'video'));
+      }
+
+      function graph3dHexToRgb(hex) {
+        if (typeof hex !== 'string' || !hex) return { r: 255, g: 255, b: 255 };
+        const normalized = hex.startsWith('#') ? hex.slice(1) : hex;
+        const value = normalized.length === 3
+          ? normalized.split('').map(ch => ch + ch).join('')
+          : normalized.padStart(6, '0').slice(0, 6);
+        const intVal = parseInt(value, 16);
+        return {
+          r: (intVal >> 16) & 255,
+          g: (intVal >> 8) & 255,
+          b: intVal & 255
+        };
+      }
+
+      function graph3dRgbToHex(r, g, b) {
+        const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+        return `#${[clamp(r), clamp(g), clamp(b)].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+      }
+
+      function graph3dMixHexColors(colorA, colorB, ratio) {
+        const t = Math.max(0, Math.min(1, Number(ratio) || 0));
+        const a = graph3dHexToRgb(colorA || '#ffffff');
+        const b = graph3dHexToRgb(colorB || '#ffffff');
+        const mix = (k) => a[k] * (1 - t) + b[k] * t;
+        return graph3dRgbToHex(mix('r'), mix('g'), mix('b'));
+      }
+
+      function findGraph3dNodeByPath(pathValue) {
+        const normalized = normalizeFsPath(pathValue);
+        if (!normalized) return null;
+        return graph3dNodesByPath.get(normalized) || graph3dNodesByLowerPath.get(normalized.toLowerCase()) || null;
+      }
+
+      function registerGraph3dHighlightMesh(mesh) {
+        if (!mesh) return;
+        if (typeof mesh.traverse !== 'function') return;
+
+        const materialEntries = [];
+        mesh.traverse((child) => {
+          if (!child || !child.material) return;
+          const weight = child.userData && typeof child.userData.__graph3dHighlightWeight === 'number'
+            ? child.userData.__graph3dHighlightWeight
+            : 1;
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((mat) => {
+            if (!mat) return;
+            mat.transparent = true;
+            if (mat.depthWrite !== false) mat.depthWrite = false;
+            materialEntries.push({ material: mat, weight });
+          });
+        });
+
+        if (!materialEntries.length) return;
+
+        mesh.userData = mesh.userData || {};
+        mesh.userData.__graph3dHighlightMaterials = materialEntries;
+        mesh.userData.__graph3dHighlightStart = performance.now();
+        if (mesh.userData.__graph3dHighlightBase == null) {
+          mesh.userData.__graph3dHighlightBase = 0.6;
+        }
+        if (mesh.userData.__graph3dHighlightAmp == null) {
+          mesh.userData.__graph3dHighlightAmp = 0.36;
+        }
+        if (mesh.userData.__graph3dHighlightSpeed == null) {
+          mesh.userData.__graph3dHighlightSpeed = 1.6;
+        }
+
+        const baseOpacity = mesh.userData.__graph3dHighlightBase;
+        materialEntries.forEach(({ material, weight }, index) => {
+          if (!material || typeof material.opacity !== 'number') return;
+          const offset = index ? Math.min(0.28, 0.12 * index) : 0;
+          material.opacity = Math.max(0.08, Math.min(1, (baseOpacity + offset) * (weight || 1)));
+        });
+
+        graph3dHighlightMeshes.add(mesh);
+        ensureGraph3dHighlightAnimation();
+      }
+
+      function stopGraph3dHighlightAnimation() {
+        if (graph3dHighlightRafId != null) {
+          cancelAnimationFrame(graph3dHighlightRafId);
+          graph3dHighlightRafId = null;
+        }
+      }
+
+      function ensureGraph3dHighlightAnimation() {
+        if (graph3dHighlightRafId != null) return;
+        const step = (timestamp) => {
+          if (!graph3dHighlightMeshes.size) {
+            stopGraph3dHighlightAnimation();
+            return;
+          }
+          graph3dHighlightMeshes.forEach((mesh) => {
+            if (!mesh) {
+              graph3dHighlightMeshes.delete(mesh);
+              return;
+            }
+            const materials = mesh.userData?.__graph3dHighlightMaterials;
+            if (!Array.isArray(materials) || !materials.length) {
+              graph3dHighlightMeshes.delete(mesh);
+              return;
+            }
+            const start = mesh.userData?.__graph3dHighlightStart || 0;
+            const base = mesh.userData?.__graph3dHighlightBase ?? 0.6;
+            const amp = mesh.userData?.__graph3dHighlightAmp ?? 0.36;
+            const speed = mesh.userData?.__graph3dHighlightSpeed ?? 1.6;
+            const elapsed = Math.max(0, (timestamp - start) / 1000);
+            const wave = 0.5 + 0.5 * Math.sin(elapsed * speed * Math.PI * 2);
+            const pulse = base + amp * wave;
+            materials.forEach((entry) => {
+              const material = entry && entry.material;
+              if (!material || typeof material.opacity !== 'number') return;
+              const weight = entry && typeof entry.weight === 'number' ? entry.weight : 1;
+              const target = Math.max(0.05, Math.min(1, pulse * weight));
+              material.opacity = target;
+            });
+          });
+          graph3dHighlightRafId = requestAnimationFrame(step);
+        };
+        graph3dHighlightRafId = requestAnimationFrame(step);
+      }
+
+      function clearGraph3dHighlightMeshes() {
+        graph3dHighlightMeshes.clear();
+        stopGraph3dHighlightAnimation();
+      }
+
+      function updateGraph3dBloomIntensity() {
+        const hasHighlight = graph3dActiveHighlightNodeIds.size > 0;
+        const target = hasHighlight ? GRAPH3D_BLOOM_HIGHLIGHT : GRAPH3D_BLOOM_DEFAULT;
+        if (graph3dBloomPass) {
+          graph3dBloomPass.strength = target.strength;
+          graph3dBloomPass.radius = target.radius;
+          graph3dBloomPass.threshold = target.threshold;
+        }
+        if (graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number') {
+          graph3dRenderer.toneMappingExposure = hasHighlight ? GRAPH3D_EXPOSURE_HIGHLIGHT : GRAPH3D_EXPOSURE_DEFAULT;
+        }
+        try {
+          console.debug('[Taskboard][3D][Bloom] intensity update', {
+            hasHighlight,
+            strength: target.strength,
+            radius: target.radius,
+            threshold: target.threshold,
+            exposure: graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number' ? graph3dRenderer.toneMappingExposure : null,
+            hasBloomPass: !!graph3dBloomPass
+          });
+        } catch (_) {}
+      }
+
+      function getGraph3dHighlightTexture() {
+        if (!window.THREE) return null;
+        if (graph3dHighlightSpriteTexture) return graph3dHighlightSpriteTexture;
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.06, size / 2, size / 2, size * 0.48);
+        gradient.addColorStop(0.0, 'rgba(255,255,255,1)');
+        gradient.addColorStop(0.32, 'rgba(255,244,214,0.82)');
+        gradient.addColorStop(0.64, 'rgba(255,193,120,0.35)');
+        gradient.addColorStop(1.0, 'rgba(255,255,255,0)');
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, size, size);
+        const texture = new THREE.Texture(canvas);
+        texture.needsUpdate = true;
+        if (THREE.SRGBColorSpace) {
+          texture.colorSpace = THREE.SRGBColorSpace;
+        }
+        graph3dHighlightSpriteTexture = texture;
+        return graph3dHighlightSpriteTexture;
+      }
+
+      function createGraph3dHighlightMesh(node) {
+        if (!window.THREE) return null;
+        if (!graph3dHighlightGeometry) {
+          graph3dHighlightGeometry = new THREE.SphereGeometry(1, 48, 48);
+        }
+        const nodeSize = graph3dComputeNodeSize(node);
+        const group = new THREE.Group();
+
+        const innerMaterial = new THREE.MeshBasicMaterial({
+          color: '#ffffff',
+          transparent: true,
+          opacity: 0.72,
+          depthWrite: false,
+          depthTest: false,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide
+        });
+        const innerMesh = new THREE.Mesh(graph3dHighlightGeometry, innerMaterial);
+        const innerScale = nodeSize * 1.72;
+        innerMesh.scale.set(innerScale, innerScale, innerScale);
+        innerMesh.renderOrder = 998;
+        innerMesh.userData = innerMesh.userData || {};
+        innerMesh.userData.__graph3dHighlightWeight = 1.0;
+        group.add(innerMesh);
+
+        const highlightTexture = getGraph3dHighlightTexture();
+        if (highlightTexture) {
+          const spriteMaterial = new THREE.SpriteMaterial({
+            map: highlightTexture,
+            color: new THREE.Color('#ffffff'),
+            transparent: true,
+            opacity: 0.58,
+            depthWrite: false,
+            depthTest: false,
+            blending: THREE.AdditiveBlending
+          });
+          const sprite = new THREE.Sprite(spriteMaterial);
+          const spriteScale = nodeSize * 5.6;
+          sprite.scale.set(spriteScale, spriteScale, spriteScale);
+          sprite.renderOrder = 999;
+          sprite.userData = sprite.userData || {};
+          sprite.userData.__graph3dHighlightWeight = 1.35;
+          group.add(sprite);
+          group.userData = group.userData || {};
+          group.userData.__graph3dHighlightSpriteMaterial = spriteMaterial;
+        }
+
+        group.userData = group.userData || {};
+        group.userData.__graph3dHighlightBase = 0.38;
+        group.userData.__graph3dHighlightAmp = 0.54;
+        group.userData.__graph3dHighlightSpeed = 1.45;
+
+        if (graph3dBloomLayer) {
+          group.layers.enable(GRAPH3D_BLOOM_SCENE);
+          innerMesh.layers.enable(GRAPH3D_BLOOM_SCENE);
+          group.children.forEach((child) => {
+            if (child && child.layers) child.layers.enable(GRAPH3D_BLOOM_SCENE);
+          });
+        }
+
+        return group;
+      }
+
+      function shouldTaskTriggerHighlight(task) {
+        if (!task || typeof task !== 'object') return false;
+        if (task.manualDone) return false;
+        const status = String(task.status || '').toLowerCase();
+        return status !== 'completed' && status !== 'done';
+      }
+
+      function extractPathsFromText(text) {
+        const result = new Set();
+        if (typeof text !== 'string' || !text.trim()) return result;
+        const pattern = /(?:\/(?:Users|home|mnt|Volumes)[^\s`"<>]+|(?:\.{0,2}\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)/g;
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          let candidate = match[0];
+          if (!candidate) continue;
+          candidate = candidate.replace(/^[`'"\s]+/, '').replace(/[`'"\s.,;:!?)]*$/, '');
+          if (!candidate || candidate.includes('://')) continue;
+          const normalized = normalizeFsPath(candidate);
+          if (normalized) result.add(normalized);
+        }
+        return result;
+      }
+
+      function collectPathsFromTask(task) {
+        const result = new Set();
+        if (!task) return result;
+        extractPathsFromText(task.prompt || '').forEach((path) => result.add(path));
+        if (Array.isArray(task.files)) {
+          task.files.forEach((filePath) => {
+            const normalized = normalizeFsPath(filePath);
+            if (normalized) result.add(normalized);
+          });
+        }
+        return result;
+      }
+
+      function setsEqual(a, b) {
+        if (a.size !== b.size) return false;
+        for (const value of a) {
+          if (!b.has(value)) return false;
+        }
+        return true;
+      }
+
+      function applyGraph3dHighlightNodes() {
+        if (!graph3dActiveTaskPaths.size) {
+          if (graph3dActiveHighlightNodeIds.size) {
+            graph3dActiveHighlightNodeIds = new Set();
+            if (graph3dInstance) {
+              refreshGraph3dNodeObjects({ force: true });
+            } else {
+              clearGraph3dHighlightMeshes();
+            }
+          } else {
+            clearGraph3dHighlightMeshes();
+          }
+        updateGraph3dBloomIntensity();
+        return;
+      }
+      if (!graph3dDataCache || !Array.isArray(graph3dDataCache.nodes) || !graph3dDataCache.nodes.length) {
+        updateGraph3dBloomIntensity();
+        return;
+      }
+        if (!graph3dNodesByPath.size) {
+          indexGraph3dNodePaths();
+        }
+        const baseDir = graph3dIndexedBaseDir || (graph3dDataCache?.baseDir ? normalizeFsPath(graph3dDataCache.baseDir) : '');
+        const nextIds = new Set();
+        graph3dActiveTaskPaths.forEach((rawPath) => {
+          if (!rawPath) return;
+          const normalized = normalizeFsPath(rawPath);
+          const candidates = [];
+          candidates.push(normalized);
+          const trimmed = normalizeRelativeGraphPath(normalized);
+          if (trimmed && trimmed !== normalized) candidates.push(trimmed);
+          if (baseDir) {
+            const stripped = stripBaseDirFromPath(normalized, baseDir);
+            if (stripped && stripped !== normalized) {
+              candidates.push(stripped);
+              const strippedRel = normalizeRelativeGraphPath(stripped);
+              if (strippedRel && strippedRel !== stripped) {
+                candidates.push(strippedRel);
+              }
+            }
+          }
+          let matched = null;
+          for (const candidate of candidates) {
+            if (!candidate) continue;
+            const node = findGraph3dNodeByPath(candidate);
+            if (node) {
+              matched = node;
+              break;
+            }
+          }
+          if (!matched && normalized) {
+            const withoutLeading = normalized.replace(/^\/+/, '');
+            if (withoutLeading && withoutLeading !== normalized) {
+              matched = findGraph3dNodeByPath(withoutLeading);
+            }
+          }
+          if (matched && matched.id != null) {
+            nextIds.add(matched.id);
+          }
+        });
+        if (!setsEqual(nextIds, graph3dActiveHighlightNodeIds)) {
+          graph3dActiveHighlightNodeIds = nextIds;
+          if (graph3dInstance) {
+            refreshGraph3dNodeObjects({ force: true });
+          }
+        }
+        updateGraph3dBloomIntensity();
+      }
+
+      function updateGraph3dTaskHighlights() {
+        const nextPaths = new Set();
+        if (Array.isArray(state.tasks)) {
+          state.tasks.forEach((task) => {
+            if (!shouldTaskTriggerHighlight(task)) return;
+            collectPathsFromTask(task).forEach((path) => {
+              if (path) nextPaths.add(path);
+            });
+          });
+        }
+        if (!setsEqual(nextPaths, graph3dActiveTaskPaths)) {
+          graph3dActiveTaskPaths = nextPaths;
+          applyGraph3dHighlightNodes();
         }
       }
 
@@ -3183,6 +3654,7 @@ async function initDocMenuTable() {
             graph3dCollapsed: !!state.graph3dCollapsed,
             graph3dViewMode: state.graph3dViewMode,
             graph3dInfoCollapsed: !!state.graph3dInfoCollapsed,
+            graph3dDimInactive: state.graph3dDimInactive !== false,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3228,6 +3700,9 @@ async function initDocMenuTable() {
           }
           if (typeof saved.graph3dInfoCollapsed === 'boolean') {
             state.graph3dInfoCollapsed = saved.graph3dInfoCollapsed;
+          }
+          if (typeof saved.graph3dDimInactive === 'boolean') {
+            state.graph3dDimInactive = saved.graph3dDimInactive;
           }
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
@@ -3501,6 +3976,7 @@ async function initDocMenuTable() {
                 <input type="search" id="taskboard3dSearch" class="tb-3d-search-input" placeholder="ファイル・パスを検索" autocomplete="off" spellcheck="false" aria-controls="taskboard3dSearchResults" aria-haspopup="listbox" aria-expanded="false" aria-label="ファイル検索" />
                 <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
                 <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
+                <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true">実装ハイライト ON</button>
               </div>
               <div class="tb-3d-placeholder" id="taskboard3dStatus">3Dビューは未読み込みです。</div>
             </div>
@@ -3596,6 +4072,7 @@ async function initDocMenuTable() {
     graph3dSearchInputEl = panel.querySelector('#taskboard3dSearch');
     graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
     graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
+    graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
     initializeGraph3dSearchUI();
     bindGraph3dSearchEvents();
     updateGraph3dInfoVisibility();
@@ -3677,31 +4154,303 @@ async function initDocMenuTable() {
       return loadExternalScriptOnce('//cdn.jsdelivr.net/npm/3d-force-graph', () => window.ForceGraph3D);
     }
 
-    async function ensureBloomPass(graphInstance) {
-      if (!graphInstance || typeof graphInstance.postProcessingComposer !== 'function') return;
-      try {
-        if (typeof graphInstance.postProcessing === 'function') {
-          graphInstance.postProcessing(true);
-        }
-        const composer = graphInstance.postProcessingComposer();
-        if (!composer || composer.__hasBloomPass) return;
-        await ensureThreeLibrary();
-        if (!bloomPassClass) {
-          const mod = await import('https://esm.sh/three/examples/jsm/postprocessing/UnrealBloomPass.js?external=three');
-          bloomPassClass = mod?.UnrealBloomPass || mod?.default || null;
-        }
-        if (!bloomPassClass || !window.THREE) return;
-        const renderer = graphInstance.renderer && graphInstance.renderer();
-        const size = renderer?.getSize ? renderer.getSize(new window.THREE.Vector2()) : new window.THREE.Vector2(graph3dCanvasEl?.clientWidth || window.innerWidth, graph3dCanvasEl?.clientHeight || window.innerHeight);
-        const bloomPass = new bloomPassClass(size, 1.6, 0.85, 0.0);
-        bloomPass.strength = 1.78;
-        bloomPass.radius = 0.82;
-        bloomPass.threshold = 0.0;
-        composer.addPass(bloomPass);
-        composer.__hasBloomPass = true;
-      } catch (error) {
-        console.warn('[Taskboard][3D] bloom setup failed', error);
+    function getGraph3dRendererSize(graphInstance) {
+      const fallbackWidth = graph3dCanvasEl?.clientWidth || window.innerWidth || 1;
+      const fallbackHeight = graph3dCanvasEl?.clientHeight || window.innerHeight || 1;
+      if (!graphInstance || !window.THREE) {
+        return { width: fallbackWidth, height: fallbackHeight };
       }
+      try {
+        const renderer = typeof graphInstance.renderer === 'function' ? graphInstance.renderer() : null;
+        if (renderer && typeof renderer.getSize === 'function') {
+          const target = renderer.getSize(new window.THREE.Vector2());
+          const width = Number.isFinite(target?.x) ? target.x : fallbackWidth;
+          const height = Number.isFinite(target?.y) ? target.y : fallbackHeight;
+          return { width, height };
+        }
+      } catch (_) {}
+      return { width: fallbackWidth, height: fallbackHeight };
+    }
+
+    function updateGraph3dBloomResolution(width, height) {
+      const safeWidth = Math.max(1, Math.floor(width || 0));
+      const safeHeight = Math.max(1, Math.floor(height || 0));
+      if (graph3dBloomPass) {
+        try {
+          if (typeof graph3dBloomPass.setSize === 'function') {
+            graph3dBloomPass.setSize(safeWidth, safeHeight);
+          } else if (graph3dBloomPass.resolution && typeof graph3dBloomPass.resolution.set === 'function') {
+            graph3dBloomPass.resolution.set(safeWidth, safeHeight);
+          }
+        } catch (_) {}
+      }
+      if (graph3dBloomComposer && typeof graph3dBloomComposer.setSize === 'function') {
+        try {
+          graph3dBloomComposer.setSize(safeWidth, safeHeight);
+        } catch (_) {}
+      }
+      try {
+        console.debug('[Taskboard][3D][Bloom] resize', {
+          width: safeWidth,
+          height: safeHeight,
+          composerConfigured: !!(graph3dBloomComposer && graph3dBloomComposer.__graphBloomConfigured),
+          hasBloomPass: !!graph3dBloomPass
+        });
+      } catch (_) {}
+    }
+
+    function configureGraph3dSceneEnvironment(graphInstance) {
+      if (!graphInstance || typeof graphInstance.scene !== 'function' || !window.THREE) return;
+      const scene = graphInstance.scene();
+      if (!scene) return;
+      try {
+        const fogColor = new THREE.Color(GRAPH3D_FOG_COLOR);
+        scene.background = fogColor.clone();
+        if (!scene.fog || scene.fog.isFogExp2 || scene.fog.isFog) {
+          scene.fog = new THREE.FogExp2(fogColor, GRAPH3D_FOG_DENSITY);
+          scene.fog.name = 'Graph3dFog';
+        }
+        if (scene.fog) {
+          if (scene.fog.color && typeof scene.fog.color.set === 'function') {
+            scene.fog.color.set(GRAPH3D_FOG_COLOR);
+          }
+          if ('density' in scene.fog) {
+            scene.fog.density = GRAPH3D_FOG_DENSITY;
+          }
+          if ('near' in scene.fog && 'far' in scene.fog) {
+            scene.fog.near = GRAPH3D_FOG_LINEAR.near;
+            scene.fog.far = GRAPH3D_FOG_LINEAR.far;
+          }
+        }
+      } catch (_) {}
+
+      if (Array.isArray(graph3dSceneLights) && graph3dSceneLights.length) {
+        graph3dSceneLights.forEach((light) => {
+          try {
+            if (light && light.parent) {
+              light.parent.remove(light);
+            }
+          } catch (_) {}
+        });
+      }
+      graph3dSceneLights = [];
+
+      try {
+        const ambient = new THREE.AmbientLight('#f5f9ff', 0.56);
+        const key = new THREE.PointLight('#fff4d4', 1.05);
+        key.position.set(0, 160, 0);
+        const rim = new THREE.PointLight('#3c54ff', 0.42);
+        rim.position.set(-180, 60, 220);
+        [ambient, key, rim].forEach((light) => {
+          if (!light) return;
+          light.castShadow = false;
+          graph3dSceneLights.push(light);
+          scene.add(light);
+        });
+      } catch (_) {}
+
+      try {
+        const camera = typeof graphInstance.camera === 'function' ? graphInstance.camera() : null;
+        if (camera) {
+          camera.near = GRAPH3D_CAMERA_LIMITS.near;
+          camera.far = GRAPH3D_CAMERA_LIMITS.far;
+          if (typeof camera.updateProjectionMatrix === 'function') {
+            camera.updateProjectionMatrix();
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const controls = typeof graphInstance.controls === 'function' ? graphInstance.controls() : null;
+        if (controls) {
+          controls.enableDamping = true;
+          controls.dampingFactor = GRAPH3D_CAMERA_LIMITS.damping;
+          if ('minDistance' in controls) controls.minDistance = GRAPH3D_CAMERA_LIMITS.minDistance;
+          if ('maxDistance' in controls) controls.maxDistance = GRAPH3D_CAMERA_LIMITS.maxDistance;
+        }
+      } catch (_) {}
+
+      ensureGraph3dBloom(graphInstance).catch(() => {});
+    }
+
+    async function ensureBloomDependencies() {
+      await ensureThreeLibrary();
+      
+      if (!graph3dBloomImports.OutputPass) {
+        try {
+          const mod = await import('https://esm.sh/three/examples/jsm/postprocessing/OutputPass.js?external=three');
+          graph3dBloomImports.OutputPass = mod?.OutputPass || mod?.default || null;
+        } catch (error) {
+          console.warn('[Taskboard][3D] failed to load OutputPass', error);
+        }
+      }
+      
+      if (!graph3dBloomImports.ShaderPass) {
+        try {
+          const mod = await import('https://esm.sh/three/examples/jsm/postprocessing/ShaderPass.js?external=three');
+          graph3dBloomImports.ShaderPass = mod?.ShaderPass || mod?.default || null;
+        } catch (error) {
+          console.warn('[Taskboard][3D] failed to load ShaderPass', error);
+        }
+      }
+      
+      return !!(graph3dBloomImports.OutputPass && graph3dBloomImports.ShaderPass);
+    }
+
+    function resetGraph3dBloom() {
+      graph3dBloomComposer = null;
+      graph3dFinalComposer = null;
+      graph3dBloomPass = null;
+      graph3dMixPass = null;
+      graph3dMaterialsCache = {};
+    }
+
+    async function ensureGraph3dBloom(graphInstance) {
+      if (!graphInstance || !window.THREE) return;
+      if (typeof graphInstance.postProcessing !== 'function' || typeof graphInstance.postProcessingComposer !== 'function') return;
+
+      const bloomReady = await ensureBloomPassClass();
+      const outputReady = await ensureBloomDependencies();
+      if (!bloomReady || !outputReady || !bloomPassClass || !graph3dBloomImports.OutputPass || !graph3dBloomImports.ShaderPass) return;
+
+      // レイヤーとマテリアルの初期化
+      if (!graph3dBloomLayer) {
+        graph3dBloomLayer = new window.THREE.Layers();
+        graph3dBloomLayer.set(GRAPH3D_BLOOM_SCENE);
+      }
+      if (!graph3dDarkMaterial) {
+        graph3dDarkMaterial = new window.THREE.MeshBasicMaterial({ color: 'black' });
+      }
+
+      graphInstance.postProcessing(false); // デフォルトのポストプロセッシングを無効化
+      
+      const renderer = typeof graphInstance.renderer === 'function' ? graphInstance.renderer() : null;
+      const scene = typeof graphInstance.scene === 'function' ? graphInstance.scene() : null;
+      const camera = typeof graphInstance.camera === 'function' ? graphInstance.camera() : null;
+      
+      if (!renderer || !scene || !camera) return;
+
+      const { width, height } = getGraph3dRendererSize(graphInstance);
+      
+      // EffectComposerのインポート
+      if (!window.THREE.EffectComposer) {
+        const composerMod = await import('https://esm.sh/three/examples/jsm/postprocessing/EffectComposer.js?external=three');
+        window.THREE.EffectComposer = composerMod.EffectComposer || composerMod.default;
+      }
+      if (!window.THREE.RenderPass) {
+        const renderPassMod = await import('https://esm.sh/three/examples/jsm/postprocessing/RenderPass.js?external=three');
+        window.THREE.RenderPass = renderPassMod.RenderPass || renderPassMod.default;
+      }
+
+      // Bloom用コンポーザー
+      graph3dBloomComposer = new window.THREE.EffectComposer(renderer);
+      graph3dBloomComposer.renderToScreen = false;
+      
+      const renderScene = new window.THREE.RenderPass(scene, camera);
+      graph3dBloomComposer.addPass(renderScene);
+      
+      const resolution = new window.THREE.Vector2(width, height);
+      graph3dBloomPass = new bloomPassClass(resolution, GRAPH3D_BLOOM_DEFAULT.strength, GRAPH3D_BLOOM_DEFAULT.radius, GRAPH3D_BLOOM_DEFAULT.threshold);
+      graph3dBloomComposer.addPass(graph3dBloomPass);
+
+      // 最終合成用コンポーザー
+      graph3dFinalComposer = new window.THREE.EffectComposer(renderer);
+      graph3dFinalComposer.addPass(renderScene);
+      
+      // MixPass（Bloom合成用）
+      const ShaderPassClass = graph3dBloomImports.ShaderPass;
+      graph3dMixPass = new ShaderPassClass(
+        new window.THREE.ShaderMaterial({
+          uniforms: {
+            baseTexture: { value: null },
+            bloomTexture: { value: graph3dBloomComposer.renderTarget2.texture }
+          },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform sampler2D baseTexture;
+            uniform sampler2D bloomTexture;
+            varying vec2 vUv;
+            void main() {
+              gl_FragColor = texture2D(baseTexture, vUv) + vec4(1.0) * texture2D(bloomTexture, vUv);
+            }
+          `,
+          defines: {}
+        }), 'baseTexture'
+      );
+      graph3dMixPass.needsSwap = true;
+      graph3dFinalComposer.addPass(graph3dMixPass);
+
+      // レンダラー設定
+      renderer.toneMapping = window.THREE.ReinhardToneMapping;
+      renderer.toneMappingExposure = GRAPH3D_EXPOSURE_DEFAULT;
+
+      // カスタムレンダー関数を設定
+      // Force-Graph-3Dのレンダリングループをオーバーライド
+      let animationId = null;
+      const customRender = () => {
+        scene.traverse(darkenNonBloomed);
+        graph3dBloomComposer.render();
+        scene.traverse(restoreMaterial);
+        graph3dFinalComposer.render();
+      };
+      
+      // Force-Graph-3Dの_animationCycleを保存して置き換え
+      const originalAnimationCycle = graphInstance._animationCycle;
+      graphInstance._animationCycle = function() {
+        // 元のアニメーションサイクルを実行（物理シミュレーションなど）
+        if (originalAnimationCycle) {
+          originalAnimationCycle.call(this);
+        }
+        // カスタムレンダリングを実行
+        customRender();
+        // デフォルトのレンダリングを防ぐために、renderメソッドを空にする
+        return false;
+      };
+      
+      // 元のrenderメソッドをオーバーライド
+      const originalRender = renderer.render;
+      renderer.render = () => {
+        // 何もしない（customRenderで処理）
+      };
+
+      try {
+        console.info('[Taskboard][3D][Bloom] configured selective bloom pipeline', {
+          width,
+          height,
+          strength: graph3dBloomPass.strength,
+          radius: graph3dBloomPass.radius,
+          threshold: graph3dBloomPass.threshold
+        });
+      } catch (_) {}
+    }
+
+    function darkenNonBloomed(obj) {
+      if (obj.isMesh && graph3dBloomLayer && graph3dBloomLayer.test(obj.layers) === false) {
+        graph3dMaterialsCache[obj.uuid] = obj.material;
+        obj.material = graph3dDarkMaterial;
+      }
+    }
+
+    function restoreMaterial(obj) {
+      if (graph3dMaterialsCache[obj.uuid]) {
+        obj.material = graph3dMaterialsCache[obj.uuid];
+        delete graph3dMaterialsCache[obj.uuid];
+      }
+    }
+
+    async function ensureBloomPassClass() {
+      await ensureThreeLibrary();
+      if (!bloomPassClass) {
+        const mod = await import('https://esm.sh/three/examples/jsm/postprocessing/UnrealBloomPass.js?external=three');
+        bloomPassClass = mod?.UnrealBloomPass || mod?.default || null;
+      }
+      return bloomPassClass;
     }
 
     function graph3dSetStatus(message, mode = 'info') {
@@ -3749,6 +4498,79 @@ async function initDocMenuTable() {
       return !!(node && (node.type === 'image' || node.type === 'video'));
     }
 
+    function graph3dComputeNodeSize(node) {
+      if (!node || typeof node !== 'object') return 8;
+      if (node.type === 'root') return 18;
+      if (node.type === 'folder') return 11;
+      return 8;
+    }
+
+    function graph3dResolveNodeVisual(node) {
+      const baseHex = GRAPH3D_NODE_COLORS[node?.type] || GRAPH3D_NODE_COLORS.other;
+      const isMediaMode = graph3dIsMediaMode();
+      const isMediaAsset = graph3dIsMediaAsset(node);
+      const isHighlight = !!(node && node.id != null && graph3dActiveHighlightNodeIds.has(node.id));
+      const hasHighlights = graph3dActiveHighlightNodeIds.size > 0;
+      const dimInactive = state.graph3dDimInactive !== false;
+      const shouldDim = dimInactive && hasHighlights && !isHighlight && !isMediaAsset;
+      const shouldBoost = !dimInactive && hasHighlights && !isHighlight && !isMediaAsset;
+
+      let fillHex = baseHex;
+
+      if (isMediaMode && !isMediaAsset && dimInactive) {
+        fillHex = graph3dMixHexColors(baseHex, '#ffffff', 0.5);
+      }
+
+      fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.28);
+      let emissiveHex = graph3dMixHexColors(fillHex, '#fbeedb', 0.42);
+      let opacity = 0.96;
+      let emissiveIntensity = dimInactive ? 0.8 : 1.0;
+      let metalness = dimInactive ? 0.04 : 0.05;
+      let roughness = dimInactive ? 0.22 : 0.18;
+
+      if (isHighlight) {
+        fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.65);
+        emissiveHex = '#ffffff';
+        opacity = 1;
+        emissiveIntensity = 2.5;
+        metalness = 0.08;
+        roughness = 0.12;
+      } else if (shouldDim) {
+        fillHex = graph3dMixHexColors(fillHex, '#05060c', 0.55);
+        emissiveHex = graph3dMixHexColors('#060810', '#151d2f', 0.3);
+        opacity = 0.78;
+        emissiveIntensity = 0.3;
+        metalness = 0.02;
+        roughness = 0.46;
+      } else if (shouldBoost) {
+        fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.34);
+        emissiveHex = graph3dMixHexColors(fillHex, '#ffe4a3', 0.48);
+        opacity = 0.99;
+        emissiveIntensity = dimInactive ? 1.2 : 1.5;
+        metalness = 0.05;
+        roughness = 0.16;
+      } else if (!isMediaAsset) {
+        emissiveIntensity = dimInactive ? 0.7 : 0.9;
+        roughness = dimInactive ? 0.24 : 0.2;
+      }
+
+      return {
+        colorHex: fillHex,
+        emissiveHex,
+        opacity,
+        emissiveIntensity,
+        metalness,
+        roughness,
+        isHighlight,
+        isMediaAsset,
+        shouldDim
+      };
+    }
+
+    function graph3dGetNodeColorHex(node) {
+      return graph3dResolveNodeVisual(node).colorHex;
+    }
+
     function getGraph3dSphereObject(node, cacheKey) {
       if (!window.THREE) return null;
       if (!graph3dSphereGeometry) {
@@ -3758,19 +4580,33 @@ async function initDocMenuTable() {
         const cached = graph3dNodeObjectCache.get(cacheKey);
         return cached?.object || cached;
       }
-      const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other);
+      const style = graph3dResolveNodeVisual(node);
+      const color = new THREE.Color(style.colorHex);
+      const emissive = new THREE.Color(style.emissiveHex || style.colorHex);
       const material = new THREE.MeshStandardMaterial({
-        color: baseColor.clone().lerp(new THREE.Color('#dbeafe'), 0.18),
-        emissive: baseColor.clone().multiplyScalar(0.45),
-        emissiveIntensity: 1.2,
-        metalness: 0.05,
-        roughness: 0.4,
+        color,
+        emissive,
+        emissiveIntensity: style.emissiveIntensity,
+        metalness: style.metalness,
+        roughness: style.roughness,
         transparent: true,
-        opacity: 0.94
+        opacity: style.opacity
       });
+      // toneMapped: trueにすることでBloomエフェクトを有効化
       const mesh = new THREE.Mesh(graph3dSphereGeometry, material);
-      const nodeSize = node.type === 'root' ? 18 : node.type === 'folder' ? 11 : 8;
+      const nodeSize = graph3dComputeNodeSize(node);
       mesh.scale.set(nodeSize, nodeSize, nodeSize);
+      if (!cacheKey || !graph3dNodeObjectCache.has(cacheKey)) {
+        try {
+          console.debug('[Taskboard][3D][Bloom] node material', {
+            id: node?.id,
+            type: node?.type,
+            emissiveIntensity: style.emissiveIntensity,
+            color: style.colorHex,
+            emissive: style.emissiveHex
+          });
+        } catch (_) {}
+      }
       if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: mesh, resourceKey: null });
       return mesh;
     }
@@ -3939,11 +4775,14 @@ async function initDocMenuTable() {
         return graph3dNodeObjectCache.get(cacheKey);
       }
       const group = new THREE.Group();
-      const baseColor = new THREE.Color(GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.image);
+      const style = graph3dResolveNodeVisual(node);
+      const hasHighlights = graph3dActiveHighlightNodeIds.size > 0;
+      const baseColor = new THREE.Color(style.colorHex);
+      const spriteTint = baseColor.clone().lerp(new THREE.Color('#f5f7ff'), style.isHighlight ? 0.25 : 0.12);
       const spriteMaterial = new THREE.SpriteMaterial({
-        color: baseColor.clone().lerp(new THREE.Color('#cbd5f5'), 0.4),
+        color: spriteTint,
         transparent: true,
-        opacity: 0.92,
+        opacity: style.isHighlight ? 0.98 : (style.isMediaAsset ? 0.92 : (style.shouldDim ? Math.max(0.6, style.opacity) : style.opacity)),
         toneMapped: false
       });
       const width = node.type === 'image' ? 26 : 24;
@@ -3953,9 +4792,9 @@ async function initDocMenuTable() {
       group.add(sprite);
 
       const frameMaterial = new THREE.SpriteMaterial({
-        color: baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.55),
+        color: new THREE.Color(graph3dMixHexColors(style.colorHex, '#ffffff', style.isHighlight ? 0.6 : (style.shouldDim ? 0.32 : 0.45))),
         transparent: true,
-        opacity: 0.28,
+        opacity: style.isHighlight ? 0.5 : (style.shouldDim ? 0.18 : 0.32),
         toneMapped: false
       });
       const frame = new THREE.Sprite(frameMaterial);
@@ -3998,7 +4837,7 @@ async function initDocMenuTable() {
           .then((texture) => {
             spriteMaterial.map = texture;
             spriteMaterial.color.set(0xffffff);
-            spriteMaterial.opacity = 1;
+            spriteMaterial.opacity = style.isHighlight ? 1 : (style.shouldDim ? 0.85 : 0.97);
             spriteMaterial.needsUpdate = true;
             if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey: null, controls: null });
           })
@@ -4016,25 +4855,49 @@ async function initDocMenuTable() {
       if (!node) return null;
       const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
       const cacheKey = node && node.id != null ? `${mode}:${node.id}` : null;
-      if (mode === 'media' && isGraph3dMediaNode(node)) {
-        return getGraph3dMediaObject(node, cacheKey);
+      const baseObject = (mode === 'media' && isGraph3dMediaNode(node))
+        ? getGraph3dMediaObject(node, cacheKey)
+        : getGraph3dSphereObject(node, cacheKey);
+      
+      const isHighlighted = graph3dActiveHighlightNodeIds.has(node.id);
+      
+      // Bloomレイヤーの設定
+      if (baseObject && graph3dBloomLayer) {
+        if (isHighlighted) {
+          baseObject.layers.enable(GRAPH3D_BLOOM_SCENE);
+        } else {
+          baseObject.layers.disable(GRAPH3D_BLOOM_SCENE);
+        }
       }
-      return getGraph3dSphereObject(node, cacheKey);
+      
+      if (!window.THREE || !isHighlighted) {
+        return baseObject;
+      }
+      
+      const container = new THREE.Group();
+      if (baseObject) container.add(baseObject);
+      const highlightMesh = createGraph3dHighlightMesh(node);
+      if (highlightMesh) {
+        container.add(highlightMesh);
+        registerGraph3dHighlightMesh(highlightMesh);
+      }
+      return container;
     }
 
     function refreshGraph3dNodeObjects({ force = false } = {}) {
       if (!graph3dInstance || typeof graph3dInstance.nodeThreeObject !== 'function') return;
-     if (force) {
-       stopGraph3dActiveVideo();
-       graph3dNodeObjectCache.forEach((entry) => {
-         if (entry && entry.controls && typeof entry.controls.stop === 'function') {
-           entry.controls.stop();
+      clearGraph3dHighlightMeshes();
+      if (force) {
+        stopGraph3dActiveVideo();
+        graph3dNodeObjectCache.forEach((entry) => {
+          if (entry && entry.controls && typeof entry.controls.stop === 'function') {
+            entry.controls.stop();
           }
           if (entry && entry.controls && typeof entry.controls.dispose === 'function') {
             entry.controls.dispose();
           }
         });
-       graph3dNodeObjectCache.clear();
+        graph3dNodeObjectCache.clear();
         graph3dMediaTexturePromises.clear();
         graph3dVideoResources.forEach((promise) => {
           promise.then((resource) => {
@@ -4049,6 +4912,7 @@ async function initDocMenuTable() {
       if (typeof graph3dInstance.refresh === 'function') {
         graph3dInstance.refresh();
       }
+      updateGraph3dBloomIntensity();
     }
 
     function stopGraph3dActiveVideo() {
@@ -4506,6 +5370,9 @@ async function initDocMenuTable() {
       });
       graph3dVideoResources.clear();
       graph3dNodeObjectCache.clear();
+      graph3dBloomPass = null;
+      graph3dRenderer = null;
+      resetGraph3dBloom();
       if (graph3dInstance && typeof graph3dInstance._destructor === 'function') {
         try { graph3dInstance._destructor(); } catch (_) {}
       }
@@ -4536,10 +5403,10 @@ async function initDocMenuTable() {
           graph3dResizeObserver.disconnect();
         }
       } catch (_) {}
-      Graph.backgroundColor('#000003')
+      Graph.backgroundColor(GRAPH3D_FOG_COLOR)
         .graphData({ nodes: Array.isArray(data?.nodes) ? data.nodes : [], links: Array.isArray(data?.links) ? data.links : [] })
         .nodeLabel(node => `${node.name || ''}\n${GRAPH3D_TYPE_LABELS[node.type] || node.type || ''}`)
-        .nodeColor(node => GRAPH3D_NODE_COLORS[node.type] || GRAPH3D_NODE_COLORS.other)
+        .nodeColor(node => graph3dGetNodeColorHex(node))
         .nodeOpacity(0.9)
         .nodeVal(node => {
           if (node.type === 'root') return 28;
@@ -4554,6 +5421,8 @@ async function initDocMenuTable() {
         .linkDirectionalParticles(9)
         .linkDirectionalParticleSpeed(0.0085)
         .linkDirectionalParticleWidth(2.5);
+
+      configureGraph3dSceneEnvironment(Graph);
 
       Graph.onNodeHover(node => {
         if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
@@ -4690,6 +5559,14 @@ async function initDocMenuTable() {
         if (safeHeight > 160) {
           graph3dLastCanvasSize.height = safeHeight;
         }
+        updateGraph3dBloomResolution(safeWidth, safeHeight);
+        // 選択的Bloomのリサイズ処理
+        if (graph3dBloomComposer && typeof graph3dBloomComposer.setSize === 'function') {
+          graph3dBloomComposer.setSize(safeWidth, safeHeight);
+        }
+        if (graph3dFinalComposer && typeof graph3dFinalComposer.setSize === 'function') {
+          graph3dFinalComposer.setSize(safeWidth, safeHeight);
+        }
         clearGraph3dCanvasInlineSize();
         if (triggerFit) attemptFit(200);
       };
@@ -4697,18 +5574,25 @@ async function initDocMenuTable() {
       try {
         applyGraphDimensions(graph3dCanvasEl.clientWidth, graph3dCanvasEl.clientHeight, false);
         if (typeof Graph.postProcessing === 'function') {
-          Graph.postProcessing(true);
+          Graph.postProcessing(false); // デフォルトのポストプロセッシングを無効化
         }
         if (typeof Graph.refresh === 'function') {
           Graph.refresh();
         }
-        ensureBloomPass(Graph).catch(() => {});
-        if (Graph.renderer && typeof Graph.renderer === 'function') {
-          const renderer = Graph.renderer();
-          if (renderer) {
-            renderer.toneMappingExposure = 1.25;
+        graph3dRenderer = Graph.renderer && typeof Graph.renderer === 'function' ? Graph.renderer() : null;
+        if (graph3dRenderer && window.THREE) {
+          if ('outputColorSpace' in graph3dRenderer && window.THREE.SRGBColorSpace) {
+            graph3dRenderer.outputColorSpace = window.THREE.SRGBColorSpace;
+          } else if ('outputEncoding' in graph3dRenderer && window.THREE.sRGBEncoding) {
+            graph3dRenderer.outputEncoding = window.THREE.sRGBEncoding;
           }
+          graph3dRenderer.physicallyCorrectLights = true;
+          graph3dRenderer.useLegacyLights = false;
+          graph3dRenderer.toneMapping = window.THREE.ReinhardToneMapping;
+          graph3dRenderer.toneMappingExposure = GRAPH3D_EXPOSURE_DEFAULT;
         }
+        ensureGraph3dBloom(Graph).catch(() => {});
+        updateGraph3dBloomIntensity();
         attemptFit(400, { force: true });
         if (typeof ResizeObserver !== 'undefined') {
           graph3dResizeObserver = new ResizeObserver((entries) => {
@@ -4763,12 +5647,14 @@ async function initDocMenuTable() {
           }
           const data = await res.json();
           graph3dDataCache = data;
+          indexGraph3dNodePaths();
           const nodeCount = Array.isArray(data?.nodes) ? data.nodes.length : 0;
           const linkCount = Array.isArray(data?.links) ? data.links.length : 0;
           console.log('[Taskboard][3D] graph data', { nodes: nodeCount, links: linkCount, baseDir: data?.baseDir });
           if (graph3dBaseEl) graph3dBaseEl.textContent = data.baseDir || '-';
           updateGraph3dStats(data.stats, data.totals);
           setupGraph3dScene(ForceGraphFactory, data);
+          applyGraph3dHighlightNodes();
           if (!nodeCount || nodeCount <= 1) {
             graph3dSetStatus('表示できるノードがありません。SCAN_PATHの内容を確認してください。', 'info');
           } else {
@@ -4832,11 +5718,25 @@ async function initDocMenuTable() {
       }
     }
 
+    function updateGraph3dDimToggle() {
+      if (!graph3dDimToggleEl) return;
+      const active = state.graph3dDimInactive !== false;
+      graph3dDimToggleEl.classList.toggle('is-active', active);
+      graph3dDimToggleEl.setAttribute('aria-pressed', active ? 'true' : 'false');
+      graph3dDimToggleEl.disabled = !!state.graph3dCollapsed;
+      graph3dDimToggleEl.setAttribute('aria-disabled', state.graph3dCollapsed ? 'true' : 'false');
+      graph3dDimToggleEl.textContent = `実装ハイライト ${active ? 'ON' : 'OFF'}`;
+      graph3dDimToggleEl.title = active
+        ? '画像・動画以外のノードを暗くして実装中ノードを強調します'
+        : '画像・動画以外のノードも通常の明るさで表示します';
+    }
+
     function renderGraph3dPanel() {
       updateGraph3dToggleLabel();
       updateGraph3dModeToggle();
       updateGraph3dInfoVisibility();
       updateGraph3dSearchState();
+      updateGraph3dDimToggle();
       updateViewMode();
       if (state.graph3dCollapsed) {
         graph3dSetStatus('', 'info');
@@ -4861,7 +5761,13 @@ async function initDocMenuTable() {
         try { graph3dResizeObserver.disconnect(); } catch (_) {}
         graph3dResizeObserver = null;
       }
-      if (next) stopGraph3dActiveVideo();
+      if (next) {
+        stopGraph3dActiveVideo();
+        clearGraph3dHighlightMeshes();
+        updateGraph3dBloomIntensity();
+        graph3dRenderer = null;
+        graph3dBloomPass = null;
+      }
     }
 
     function setGraph3dInfoCollapsed(nextValue) {
@@ -5305,6 +6211,20 @@ async function initDocMenuTable() {
       updateGraph3dToggleLabel();
     } else {
       updateGraph3dToggleLabel();
+    }
+    if (graph3dDimToggleEl) {
+      graph3dDimToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        const current = state.graph3dDimInactive !== false;
+        state.graph3dDimInactive = !current;
+        updateGraph3dDimToggle();
+        refreshGraph3dNodeObjects({ force: true });
+        applyGraph3dHighlightNodes();
+        schedulePersist();
+      });
+      updateGraph3dDimToggle();
+    } else {
+      updateGraph3dDimToggle();
     }
     if (graph3dReloadEl) {
       graph3dReloadEl.addEventListener('click', (e) => {
@@ -6465,6 +7385,7 @@ async function initDocMenuTable() {
 
     function render(){
       if (!listEl) return;
+      updateGraph3dTaskHighlights();
       if (!Array.isArray(state.tasks) || state.tasks.length === 0){
         listEl.innerHTML = `<div class="tb-empty">タスクはありません。チャット欄から追加してください。</div>`;
         renderHeatmap();
