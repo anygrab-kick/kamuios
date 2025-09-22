@@ -1708,6 +1708,7 @@ async function initDocMenuTable() {
         graph3dViewMode: 'media',
         graph3dDimInactive: true,
         graph3dInfoCollapsed: true,
+        graph3dGlow: null,
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
@@ -1778,6 +1779,7 @@ async function initDocMenuTable() {
       let graph3dRenderer = null;
       let graph3dSceneLights = [];
       let graph3dDimToggleEl = null;
+      let graph3dGlowControlsEl = null;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
@@ -1807,6 +1809,26 @@ async function initDocMenuTable() {
       const TASK_TIMEZONE = 'Asia/Tokyo';
       const GRAPH3D_BLOOM_DEFAULT = { strength: 1.5, radius: 0.5, threshold: 0.0 };
       const GRAPH3D_BLOOM_HIGHLIGHT = { strength: 3.0, radius: 0.8, threshold: 0.0 };
+      const GRAPH3D_GLOW_DEFAULTS = Object.freeze({
+        highlightBase: 0.6,
+        highlightAmp: 0.36,
+        highlightSpeed: 1.6,
+        ambientBase: 0.32,
+        ambientAmp: 0.24,
+        ambientSpeed: 1.15,
+        bloomDefaultStrength: GRAPH3D_BLOOM_DEFAULT.strength,
+        bloomHighlightStrength: GRAPH3D_BLOOM_HIGHLIGHT.strength
+      });
+      const GRAPH3D_GLOW_RANGES = Object.freeze({
+        highlightBase: [0.05, 1.2],
+        highlightAmp: [0, 1.2],
+        highlightSpeed: [0.1, 4],
+        ambientBase: [0, 1],
+        ambientAmp: [0, 1.2],
+        ambientSpeed: [0.1, 4],
+        bloomDefaultStrength: [0, 5],
+        bloomHighlightStrength: [0, 6]
+      });
       const GRAPH3D_EXPOSURE_DEFAULT = 1.0;
       const GRAPH3D_EXPOSURE_HIGHLIGHT = 1.2;
       const GRAPH3D_ENTIRE_SCENE = 0;
@@ -1984,6 +2006,43 @@ async function initDocMenuTable() {
         return graph3dRgbToHex(mix('r'), mix('g'), mix('b'));
       }
 
+      function clampGraph3dValue(value, min, max) {
+        if (!Number.isFinite(value)) return min;
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function normalizeGraph3dGlowConfig(raw) {
+        const normalized = { ...GRAPH3D_GLOW_DEFAULTS };
+        if (!raw || typeof raw !== 'object') {
+          return normalized;
+        }
+        Object.keys(GRAPH3D_GLOW_DEFAULTS).forEach((key) => {
+          const source = Number(raw[key]);
+          if (Number.isFinite(source)) {
+            const [min, max] = GRAPH3D_GLOW_RANGES[key] || [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY];
+            normalized[key] = clampGraph3dValue(source, min, max);
+          }
+        });
+        return normalized;
+      }
+
+      function getGraph3dGlowConfig() {
+        const current = state.graph3dGlow && typeof state.graph3dGlow === 'object'
+          ? state.graph3dGlow
+          : null;
+        const normalized = normalizeGraph3dGlowConfig(current);
+        state.graph3dGlow = normalized;
+        return normalized;
+      }
+
+      function formatGraph3dGlowValue(key, value) {
+        if (!Number.isFinite(value)) return '';
+        if (key.startsWith('bloom')) {
+          return value.toFixed(2);
+        }
+        return value.toFixed(2);
+      }
+
       function findGraph3dNodeByPath(pathValue) {
         const normalized = normalizeFsPath(pathValue);
         if (!normalized) return null;
@@ -2086,14 +2145,25 @@ async function initDocMenuTable() {
 
       function updateGraph3dBloomIntensity() {
         const hasHighlight = graph3dActiveHighlightNodeIds.size > 0;
-        const target = hasHighlight ? GRAPH3D_BLOOM_HIGHLIGHT : GRAPH3D_BLOOM_DEFAULT;
+        const glowConfig = getGraph3dGlowConfig();
+        const ambientActive = state.graph3dDimInactive === false;
+        const target = (hasHighlight || ambientActive)
+          ? { ...GRAPH3D_BLOOM_HIGHLIGHT, strength: glowConfig.bloomHighlightStrength }
+          : { ...GRAPH3D_BLOOM_DEFAULT, strength: glowConfig.bloomDefaultStrength };
         if (graph3dBloomPass) {
           graph3dBloomPass.strength = target.strength;
           graph3dBloomPass.radius = target.radius;
           graph3dBloomPass.threshold = target.threshold;
         }
         if (graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number') {
-          graph3dRenderer.toneMappingExposure = hasHighlight ? GRAPH3D_EXPOSURE_HIGHLIGHT : GRAPH3D_EXPOSURE_DEFAULT;
+          const ambientBoost = Math.max(0, Math.min(1.2, glowConfig.ambientBase || 0));
+          const highlightBoost = Math.max(0, Math.min(1.2, glowConfig.highlightBase || 0));
+          const exposure = hasHighlight
+            ? GRAPH3D_EXPOSURE_DEFAULT + 0.16 + highlightBoost * 0.18
+            : ambientActive
+              ? GRAPH3D_EXPOSURE_DEFAULT + 0.08 + ambientBoost * 0.12
+              : GRAPH3D_EXPOSURE_DEFAULT;
+          graph3dRenderer.toneMappingExposure = exposure;
         }
         try {
           console.debug('[Taskboard][3D][Bloom] intensity update', {
@@ -2102,9 +2172,82 @@ async function initDocMenuTable() {
             radius: target.radius,
             threshold: target.threshold,
             exposure: graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number' ? graph3dRenderer.toneMappingExposure : null,
-            hasBloomPass: !!graph3dBloomPass
+            hasBloomPass: !!graph3dBloomPass,
+            ambientActive
           });
         } catch (_) {}
+      }
+
+      function updateGraph3dGlowControls() {
+        if (!graph3dGlowControlsEl) return;
+        const config = getGraph3dGlowConfig();
+        const controls = graph3dGlowControlsEl.querySelectorAll('[data-glow-input]');
+        controls.forEach((input) => {
+          const key = input.getAttribute('data-glow-key');
+          if (!key || !(key in config)) return;
+          const value = config[key];
+          const formatted = Number.isFinite(value) ? value : GRAPH3D_GLOW_DEFAULTS[key];
+          if (Number.isFinite(formatted)) {
+            const strValue = String(formatted);
+            if (input.value !== strValue) {
+              input.value = strValue;
+            }
+            const valueLabel = graph3dGlowControlsEl.querySelector(`[data-glow-value="${key}"]`);
+            if (valueLabel) {
+              valueLabel.textContent = formatGraph3dGlowValue(key, formatted);
+            }
+          }
+        });
+      }
+
+      function setGraph3dGlowValue(key, rawValue) {
+        if (!key || !(key in GRAPH3D_GLOW_DEFAULTS)) return;
+        const config = { ...getGraph3dGlowConfig() };
+        const [min, max] = GRAPH3D_GLOW_RANGES[key] || [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY];
+        const value = clampGraph3dValue(Number(rawValue), min, max);
+        if (!Number.isFinite(value)) return;
+        config[key] = value;
+        state.graph3dGlow = normalizeGraph3dGlowConfig(config);
+        const isBloomKey = key === 'bloomDefaultStrength' || key === 'bloomHighlightStrength';
+        if (isBloomKey) {
+          updateGraph3dBloomIntensity();
+        } else {
+          refreshGraph3dNodeObjects({ force: true });
+          applyGraph3dHighlightNodes();
+        }
+        updateGraph3dGlowControls();
+        schedulePersist();
+      }
+
+      function handleGraph3dGlowInput(event) {
+        if (!graph3dGlowControlsEl) return;
+        const input = event.target;
+        if (!input || !input.dataset || !input.dataset.glowKey) return;
+        const key = input.dataset.glowKey;
+        const value = Number(input.value);
+        const label = graph3dGlowControlsEl.querySelector(`[data-glow-value="${key}"]`);
+        if (label && Number.isFinite(value)) {
+          label.textContent = formatGraph3dGlowValue(key, value);
+        }
+      }
+
+      function handleGraph3dGlowChange(event) {
+        const input = event.target;
+        if (!input || !input.dataset || !input.dataset.glowKey) return;
+        const key = input.dataset.glowKey;
+        setGraph3dGlowValue(key, Number(input.value));
+      }
+
+      function bindGraph3dGlowControls() {
+        if (!graph3dGlowControlsEl) return;
+        const inputs = graph3dGlowControlsEl.querySelectorAll('[data-glow-input]');
+        inputs.forEach((input) => {
+          if (input._tbGlowBound) return;
+          input.addEventListener('input', handleGraph3dGlowInput);
+          input.addEventListener('change', handleGraph3dGlowChange);
+          input._tbGlowBound = true;
+        });
+        updateGraph3dGlowControls();
       }
 
       function getGraph3dHighlightTexture() {
@@ -2132,7 +2275,7 @@ async function initDocMenuTable() {
         return graph3dHighlightSpriteTexture;
       }
 
-      function createGraph3dHighlightMesh(node) {
+      function createGraph3dHighlightMesh(node, { variant = 'highlight' } = {}) {
         if (!window.THREE) return null;
         if (!graph3dHighlightGeometry) {
           graph3dHighlightGeometry = new THREE.SphereGeometry(1, 48, 48);
@@ -2140,49 +2283,88 @@ async function initDocMenuTable() {
         const nodeSize = graph3dComputeNodeSize(node);
         const group = new THREE.Group();
 
+        const glowConfig = getGraph3dGlowConfig();
+        const highlightSpeed = clampGraph3dValue(glowConfig.highlightSpeed || GRAPH3D_GLOW_DEFAULTS.highlightSpeed, GRAPH3D_GLOW_RANGES.highlightSpeed[0], GRAPH3D_GLOW_RANGES.highlightSpeed[1]);
+        const ambientSpeed = clampGraph3dValue(glowConfig.ambientSpeed || GRAPH3D_GLOW_DEFAULTS.ambientSpeed, GRAPH3D_GLOW_RANGES.ambientSpeed[0], GRAPH3D_GLOW_RANGES.ambientSpeed[1]);
+
+        const highlightBase = clampGraph3dValue(glowConfig.highlightBase, GRAPH3D_GLOW_RANGES.highlightBase[0], GRAPH3D_GLOW_RANGES.highlightBase[1]);
+        const highlightAmp = clampGraph3dValue(glowConfig.highlightAmp, GRAPH3D_GLOW_RANGES.highlightAmp[0], GRAPH3D_GLOW_RANGES.highlightAmp[1]);
+        const ambientBase = clampGraph3dValue(glowConfig.ambientBase, GRAPH3D_GLOW_RANGES.ambientBase[0], GRAPH3D_GLOW_RANGES.ambientBase[1]);
+        const ambientAmp = clampGraph3dValue(glowConfig.ambientAmp, GRAPH3D_GLOW_RANGES.ambientAmp[0], GRAPH3D_GLOW_RANGES.ambientAmp[1]);
+
+        const isAmbient = variant === 'ambient';
+
+        const baseValue = isAmbient
+          ? Math.max(0.12, 0.22 + ambientBase * 0.32)
+          : Math.max(0.18, highlightBase);
+        const ampValue = isAmbient
+          ? Math.max(0.04, 0.12 + ambientAmp * 0.18)
+          : Math.max(0.05, highlightAmp);
+        const speedValue = isAmbient ? ambientSpeed : highlightSpeed;
+
+        const innerOpacity = isAmbient
+          ? Math.min(0.92, 0.34 + baseValue * 0.7)
+          : Math.min(1, 0.5 + baseValue * 0.35 + ampValue * 0.1);
+        const spriteOpacity = isAmbient
+          ? Math.min(0.88, 0.28 + baseValue * 0.6)
+          : Math.min(1, 0.4 + baseValue * 0.3);
+        const innerScale = isAmbient
+          ? nodeSize * (1.45 + ambientBase * 0.45)
+          : nodeSize * (1.6 + baseValue * 0.4);
+        const spriteScale = isAmbient
+          ? nodeSize * (4.4 + ambientBase * 1.6)
+          : nodeSize * (4.8 + baseValue * 1.6);
+        const innerWeight = isAmbient
+          ? 0.7 + baseValue * 0.45
+          : 0.9 + baseValue * 0.2;
+        const spriteWeight = isAmbient
+          ? 0.85 + (baseValue + ampValue) * 0.4
+          : 1.1 + ampValue * 0.4 + baseValue * 0.3;
+        const highlightPrimaryColor = '#ff9f43';
+        const spriteColor = isAmbient ? '#fff4e4' : highlightPrimaryColor;
+
         const innerMaterial = new THREE.MeshBasicMaterial({
-          color: '#ffffff',
+          color: isAmbient ? '#ffffff' : highlightPrimaryColor,
           transparent: true,
-          opacity: 0.72,
+          opacity: innerOpacity,
           depthWrite: false,
           depthTest: false,
           blending: THREE.AdditiveBlending,
           side: THREE.DoubleSide
         });
         const innerMesh = new THREE.Mesh(graph3dHighlightGeometry, innerMaterial);
-        const innerScale = nodeSize * 1.72;
         innerMesh.scale.set(innerScale, innerScale, innerScale);
         innerMesh.renderOrder = 998;
         innerMesh.userData = innerMesh.userData || {};
-        innerMesh.userData.__graph3dHighlightWeight = 1.0;
+        innerMesh.userData.__graph3dHighlightWeight = innerWeight;
         group.add(innerMesh);
 
         const highlightTexture = getGraph3dHighlightTexture();
         if (highlightTexture) {
           const spriteMaterial = new THREE.SpriteMaterial({
             map: highlightTexture,
-            color: new THREE.Color('#ffffff'),
+            color: new THREE.Color(spriteColor),
             transparent: true,
-            opacity: 0.58,
+            opacity: spriteOpacity,
             depthWrite: false,
             depthTest: false,
             blending: THREE.AdditiveBlending
           });
           const sprite = new THREE.Sprite(spriteMaterial);
-          const spriteScale = nodeSize * 5.6;
           sprite.scale.set(spriteScale, spriteScale, spriteScale);
           sprite.renderOrder = 999;
           sprite.userData = sprite.userData || {};
-          sprite.userData.__graph3dHighlightWeight = 1.35;
+          sprite.userData.__graph3dHighlightWeight = spriteWeight;
           group.add(sprite);
           group.userData = group.userData || {};
           group.userData.__graph3dHighlightSpriteMaterial = spriteMaterial;
         }
 
         group.userData = group.userData || {};
-        group.userData.__graph3dHighlightBase = 0.38;
-        group.userData.__graph3dHighlightAmp = 0.54;
-        group.userData.__graph3dHighlightSpeed = 1.45;
+        group.userData.__graph3dHighlightBase = baseValue;
+        group.userData.__graph3dHighlightAmp = ampValue;
+        group.userData.__graph3dHighlightSpeed = speedValue;
+        group.userData.__graph3dHighlightVariant = variant;
 
         if (graph3dBloomLayer) {
           group.layers.enable(GRAPH3D_BLOOM_SCENE);
@@ -3655,6 +3837,7 @@ async function initDocMenuTable() {
             graph3dViewMode: state.graph3dViewMode,
             graph3dInfoCollapsed: !!state.graph3dInfoCollapsed,
             graph3dDimInactive: state.graph3dDimInactive !== false,
+            graph3dGlow: { ...getGraph3dGlowConfig() },
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3703,6 +3886,9 @@ async function initDocMenuTable() {
           }
           if (typeof saved.graph3dDimInactive === 'boolean') {
             state.graph3dDimInactive = saved.graph3dDimInactive;
+          }
+          if (saved.graph3dGlow && typeof saved.graph3dGlow === 'object') {
+            state.graph3dGlow = normalizeGraph3dGlowConfig(saved.graph3dGlow);
           }
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
@@ -3977,6 +4163,54 @@ async function initDocMenuTable() {
                 <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
                 <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
                 <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true">実装ハイライト ON</button>
+                <div class="tb-3d-glow-controls" id="taskboard3dGlowControls" aria-label="発光設定">
+                  <div class="tb-3d-glow-row">
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">Bloom強度(通常)</span>
+                      <input type="range" min="0" max="5" step="0.05" data-glow-key="bloomDefaultStrength" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="bloomDefaultStrength"></span>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">Bloom強度(ハイライト)</span>
+                      <input type="range" min="0" max="6" step="0.05" data-glow-key="bloomHighlightStrength" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="bloomHighlightStrength"></span>
+                    </label>
+                  </div>
+                  <div class="tb-3d-glow-row tb-3d-glow-row--compact">
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">ハイライト</span>
+                      <input type="range" min="0.05" max="1.2" step="0.01" data-glow-key="highlightBase" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="highlightBase"></span>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">振幅</span>
+                      <input type="range" min="0" max="1.2" step="0.01" data-glow-key="highlightAmp" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="highlightAmp"></span>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">速度</span>
+                      <input type="range" min="0.1" max="4" step="0.05" data-glow-key="highlightSpeed" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="highlightSpeed"></span>
+                    </label>
+                  </div>
+                  <div class="tb-3d-glow-row tb-3d-glow-row--compact">
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">アンビエント</span>
+                      <input type="range" min="0" max="1" step="0.01" data-glow-key="ambientBase" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="ambientBase"></span>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">振幅</span>
+                      <input type="range" min="0" max="1.2" step="0.01" data-glow-key="ambientAmp" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="ambientAmp"></span>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control>
+                      <span class="tb-3d-glow-label">速度</span>
+                      <input type="range" min="0.1" max="4" step="0.05" data-glow-key="ambientSpeed" data-glow-input>
+                      <span class="tb-3d-glow-value" data-glow-value="ambientSpeed"></span>
+                    </label>
+                  </div>
+                </div>
               </div>
               <div class="tb-3d-placeholder" id="taskboard3dStatus">3Dビューは未読み込みです。</div>
             </div>
@@ -4073,8 +4307,10 @@ async function initDocMenuTable() {
     graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
     graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
+    graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
     initializeGraph3dSearchUI();
     bindGraph3dSearchEvents();
+    bindGraph3dGlowControls();
     updateGraph3dInfoVisibility();
     if (!graph3dInfoResizeBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       const resizeHandler = () => requestAnimationFrame(updateGraph3dInfoVisibility);
@@ -4350,7 +4586,12 @@ async function initDocMenuTable() {
       graph3dBloomComposer.addPass(renderScene);
       
       const resolution = new window.THREE.Vector2(width, height);
-      graph3dBloomPass = new bloomPassClass(resolution, GRAPH3D_BLOOM_DEFAULT.strength, GRAPH3D_BLOOM_DEFAULT.radius, GRAPH3D_BLOOM_DEFAULT.threshold);
+      const initialGlow = getGraph3dGlowConfig();
+      const bloomDefaults = {
+        ...GRAPH3D_BLOOM_DEFAULT,
+        strength: initialGlow.bloomDefaultStrength
+      };
+      graph3dBloomPass = new bloomPassClass(resolution, bloomDefaults.strength, bloomDefaults.radius, bloomDefaults.threshold);
       graph3dBloomComposer.addPass(graph3dBloomPass);
 
       // 最終合成用コンポーザー
@@ -4428,6 +4669,8 @@ async function initDocMenuTable() {
           threshold: graph3dBloomPass.threshold
         });
       } catch (_) {}
+
+      updateGraph3dBloomIntensity();
     }
 
     function darkenNonBloomed(obj) {
@@ -4507,11 +4750,18 @@ async function initDocMenuTable() {
 
     function graph3dResolveNodeVisual(node) {
       const baseHex = GRAPH3D_NODE_COLORS[node?.type] || GRAPH3D_NODE_COLORS.other;
+      const glowConfig = getGraph3dGlowConfig();
+      const highlightBase = clampGraph3dValue(glowConfig.highlightBase, GRAPH3D_GLOW_RANGES.highlightBase[0], GRAPH3D_GLOW_RANGES.highlightBase[1]);
+      const highlightAmp = clampGraph3dValue(glowConfig.highlightAmp, GRAPH3D_GLOW_RANGES.highlightAmp[0], GRAPH3D_GLOW_RANGES.highlightAmp[1]);
+      const ambientBase = clampGraph3dValue(glowConfig.ambientBase, GRAPH3D_GLOW_RANGES.ambientBase[0], GRAPH3D_GLOW_RANGES.ambientBase[1]);
+      const ambientAmp = clampGraph3dValue(glowConfig.ambientAmp, GRAPH3D_GLOW_RANGES.ambientAmp[0], GRAPH3D_GLOW_RANGES.ambientAmp[1]);
+
       const isMediaMode = graph3dIsMediaMode();
       const isMediaAsset = graph3dIsMediaAsset(node);
       const isHighlight = !!(node && node.id != null && graph3dActiveHighlightNodeIds.has(node.id));
       const hasHighlights = graph3dActiveHighlightNodeIds.size > 0;
       const dimInactive = state.graph3dDimInactive !== false;
+      const ambientActive = !dimInactive;
       const shouldDim = dimInactive && hasHighlights && !isHighlight && !isMediaAsset;
       const shouldBoost = !dimInactive && hasHighlights && !isHighlight && !isMediaAsset;
 
@@ -4521,20 +4771,25 @@ async function initDocMenuTable() {
         fillHex = graph3dMixHexColors(baseHex, '#ffffff', 0.5);
       }
 
-      fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.28);
-      let emissiveHex = graph3dMixHexColors(fillHex, '#fbeedb', 0.42);
-      let opacity = 0.96;
-      let emissiveIntensity = dimInactive ? 0.8 : 1.0;
-      let metalness = dimInactive ? 0.04 : 0.05;
-      let roughness = dimInactive ? 0.22 : 0.18;
+      const highlightColor = '#ff9f43';
+      const ambientMix = ambientActive ? Math.min(0.18, 0.08 + ambientBase * 0.22) : 0.12;
+      fillHex = graph3dMixHexColors(fillHex, '#ffffff', ambientMix);
+      let emissiveHex = ambientActive
+        ? graph3dMixHexColors(baseHex, '#ffe8c2', Math.min(0.45, 0.24 + ambientAmp * 0.3))
+        : graph3dMixHexColors(baseHex, '#fbeedb', 0.28);
+      let opacity = ambientActive ? Math.min(0.96, 0.86 + ambientBase * 0.08) : 0.94;
+      let emissiveIntensity = ambientActive ? 0.95 + ambientBase * 0.8 + ambientAmp * 0.4 : (dimInactive ? 0.78 : 0.92);
+      let metalness = ambientActive ? 0.05 + ambientBase * 0.06 : (dimInactive ? 0.035 : 0.05);
+      let roughness = ambientActive ? Math.max(0.14, 0.24 - (ambientBase + ambientAmp) * 0.06) : (dimInactive ? 0.22 : 0.18);
 
       if (isHighlight) {
-        fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.65);
-        emissiveHex = '#ffffff';
-        opacity = 1;
-        emissiveIntensity = 2.5;
-        metalness = 0.08;
-        roughness = 0.12;
+        const highlightMix = Math.min(0.42, 0.22 + highlightBase * 0.22);
+        fillHex = graph3dMixHexColors(highlightColor, '#ffffff', highlightMix);
+        emissiveHex = graph3dMixHexColors(highlightColor, '#ffd9a6', 0.18);
+        opacity = Math.min(1, 0.9 + highlightBase * 0.1);
+        emissiveIntensity = 1.8 + highlightBase * 1.4 + highlightAmp * 0.8;
+        metalness = 0.08 + highlightBase * 0.05;
+        roughness = Math.max(0.08, 0.22 - (highlightBase + highlightAmp) * 0.1);
       } else if (shouldDim) {
         fillHex = graph3dMixHexColors(fillHex, '#05060c', 0.55);
         emissiveHex = graph3dMixHexColors('#060810', '#151d2f', 0.3);
@@ -4543,10 +4798,11 @@ async function initDocMenuTable() {
         metalness = 0.02;
         roughness = 0.46;
       } else if (shouldBoost) {
-        fillHex = graph3dMixHexColors(fillHex, '#ffffff', 0.34);
-        emissiveHex = graph3dMixHexColors(fillHex, '#ffe4a3', 0.48);
-        opacity = 0.99;
-        emissiveIntensity = dimInactive ? 1.2 : 1.5;
+        const boostMix = Math.min(0.22, 0.12 + highlightBase * 0.16);
+        fillHex = graph3dMixHexColors(baseHex, '#ffe3b0', boostMix);
+        emissiveHex = graph3dMixHexColors(baseHex, '#ffdca2', 0.28);
+        opacity = 0.97;
+        emissiveIntensity = dimInactive ? 1.15 : 1.35;
         metalness = 0.05;
         roughness = 0.16;
       } else if (!isMediaAsset) {
@@ -4563,7 +4819,8 @@ async function initDocMenuTable() {
         roughness,
         isHighlight,
         isMediaAsset,
-        shouldDim
+        shouldDim,
+        ambientActive
       };
     }
 
@@ -4860,23 +5117,25 @@ async function initDocMenuTable() {
         : getGraph3dSphereObject(node, cacheKey);
       
       const isHighlighted = graph3dActiveHighlightNodeIds.has(node.id);
+      const ambientActive = state.graph3dDimInactive === false;
+      const shouldGlow = isHighlighted || ambientActive;
       
       // Bloomレイヤーの設定
       if (baseObject && graph3dBloomLayer) {
-        if (isHighlighted) {
+        if (shouldGlow) {
           baseObject.layers.enable(GRAPH3D_BLOOM_SCENE);
         } else {
           baseObject.layers.disable(GRAPH3D_BLOOM_SCENE);
         }
       }
       
-      if (!window.THREE || !isHighlighted) {
+      if (!window.THREE || !shouldGlow) {
         return baseObject;
       }
       
       const container = new THREE.Group();
       if (baseObject) container.add(baseObject);
-      const highlightMesh = createGraph3dHighlightMesh(node);
+      const highlightMesh = createGraph3dHighlightMesh(node, { variant: isHighlighted ? 'highlight' : 'ambient' });
       if (highlightMesh) {
         container.add(highlightMesh);
         registerGraph3dHighlightMesh(highlightMesh);
@@ -6220,6 +6479,7 @@ async function initDocMenuTable() {
         updateGraph3dDimToggle();
         refreshGraph3dNodeObjects({ force: true });
         applyGraph3dHighlightNodes();
+        updateGraph3dBloomIntensity();
         schedulePersist();
       });
       updateGraph3dDimToggle();

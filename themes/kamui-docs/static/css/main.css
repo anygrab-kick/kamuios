@@ -1683,11 +1683,80 @@ pre.code code { color: var(--text); }
   top: 16px;
   left: 16px;
   z-index: 6;
-  width: min(320px, calc(100% - 64px));
+  width: min(220px, calc(100% - 72px));
   display: flex;
   flex-direction: column;
   gap: 6px;
   color: var(--text);
+  pointer-events: none;
+}
+
+.tb-3d-search > * {
+  pointer-events: auto;
+}
+
+
+.tb-3d-glow-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.55);
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.32);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  max-width: 25%;
+}
+
+.tb-3d-glow-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tb-3d-glow-row--compact {
+  gap: 4px;
+}
+
+.tb-3d-glow-control {
+  flex: 1 1 90px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.56rem;
+  color: rgba(226, 232, 240, 0.86);
+}
+
+.tb-3d-glow-label {
+  display: block;
+  font-weight: 600;
+  letter-spacing: 0.006em;
+}
+
+.tb-3d-glow-control input[type="range"] {
+  width: 100%;
+  accent-color: #60a5fa;
+  height: 14px;
+}
+
+.tb-3d-glow-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.5rem;
+  color: rgba(148, 163, 184, 0.78);
+}
+
+[data-theme="light"] .tb-3d-glow-controls {
+  background: rgba(248, 250, 252, 0.88);
+  border-color: rgba(148, 163, 184, 0.2);
+  box-shadow: 0 4px 10px rgba(148, 163, 184, 0.14);
+}
+
+[data-theme="light"] .tb-3d-glow-control {
+  color: rgba(30, 41, 59, 0.82);
+}
+
+[data-theme="light"] .tb-3d-glow-value {
+  color: rgba(71, 85, 105, 0.76);
 }
 
 .tb-3d-search-control {
