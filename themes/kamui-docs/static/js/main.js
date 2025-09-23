@@ -4388,8 +4388,7 @@ async function initDocMenuTable() {
     initializeGraph3dSearchUI();
     bindGraph3dSearchEvents();
     bindGraph3dGlowControls();
-    updateGraph3dGlowControlsVisibility();
-    updateGraph3dGlowToggle();
+    setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
     updateGraph3dInfoVisibility();
     if (!graph3dInfoResizeBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       const resizeHandler = () => requestAnimationFrame(updateGraph3dInfoVisibility);
@@ -6077,6 +6076,21 @@ async function initDocMenuTable() {
         : '3Dビューが閉じているときは使用できません';
     }
 
+    function setGraph3dGlowControlsOpen(next) {
+      const target = (!state.graph3dCollapsed) && !!next;
+      if (state.graph3dGlowControlsOpen === target) {
+        updateGraph3dGlowControlsVisibility();
+        updateGraph3dGlowToggle();
+        return;
+      }
+      state.graph3dGlowControlsOpen = target;
+      updateGraph3dGlowControlsVisibility();
+      updateGraph3dGlowToggle();
+      if (!state.graph3dCollapsed) {
+        schedulePersist();
+      }
+    }
+
     function updateGraph3dDimToggle() {
       if (!graph3dDimToggleEl) return;
       const active = state.graph3dDimInactive !== false;
@@ -6096,8 +6110,7 @@ async function initDocMenuTable() {
       updateGraph3dInfoVisibility();
       updateGraph3dSearchState();
       updateGraph3dDimToggle();
-      updateGraph3dGlowControlsVisibility();
-      updateGraph3dGlowToggle();
+      setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
       updateViewMode();
       if (state.graph3dCollapsed) {
         graph3dSetStatus('', 'info');
@@ -6115,6 +6128,9 @@ async function initDocMenuTable() {
         if (!state.matrixCollapsed) setMatrixCollapsed(true);
       }
       state.graph3dCollapsed = next;
+      if (next) {
+        state.graph3dGlowControlsOpen = false;
+      }
       renderGraph3dPanel();
       if (!next) setOpen(true);
       schedulePersist();
@@ -6592,13 +6608,12 @@ async function initDocMenuTable() {
       graph3dGlowToggleEl.addEventListener('click', (e) => {
         e.preventDefault();
         if (graph3dGlowToggleEl.disabled) return;
-        state.graph3dGlowControlsOpen = !state.graph3dGlowControlsOpen;
-        updateGraph3dGlowToggle();
-        updateGraph3dGlowControlsVisibility();
-        schedulePersist();
+        const nextOpen = !state.graph3dGlowControlsOpen;
+        setGraph3dGlowControlsOpen(nextOpen);
       });
-      updateGraph3dGlowToggle();
+      setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
     } else {
+      updateGraph3dGlowControlsVisibility();
       updateGraph3dGlowToggle();
     }
     if (graph3dReloadEl) {

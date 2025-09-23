@@ -1716,6 +1716,10 @@ pre.code code { color: var(--text); }
   max-width: 180px;
 }
 
+.tb-3d-glow-controls[hidden] {
+  display: none !important;
+}
+
 .tb-3d-glow-row {
   display: flex;
   flex-wrap: wrap;
