@@ -1965,6 +1965,23 @@ async function initDocMenuTable() {
         return normalizedPath;
       }
 
+      function getGraph3dNodeDisplayPath(node) {
+        if (!node || typeof node !== 'object') return '';
+        if (node.type === 'root') {
+          const base = graph3dDataCache?.baseDir || node.path || node.name || '';
+          return normalizeFsPath(base);
+        }
+        if (typeof node.path === 'string' && node.path) {
+          return normalizeFsPath(node.path);
+        }
+        if (typeof node.name === 'string' && node.name) {
+          return graph3dDataCache?.baseDir
+            ? normalizeFsPath(`${graph3dDataCache.baseDir}/${node.name}`)
+            : node.name;
+        }
+        return '';
+      }
+
       function indexGraph3dNodePaths() {
         graph3dNodesByPath.clear();
         graph3dNodesByLowerPath.clear();
@@ -5741,7 +5758,7 @@ async function initDocMenuTable() {
       } catch (_) {}
       Graph.backgroundColor(GRAPH3D_FOG_COLOR)
         .graphData({ nodes: Array.isArray(data?.nodes) ? data.nodes : [], links: Array.isArray(data?.links) ? data.links : [] })
-        .nodeLabel(node => `${node.name || ''}\n${GRAPH3D_TYPE_LABELS[node.type] || node.type || ''}`)
+        .nodeLabel((node) => getGraph3dNodeDisplayPath(node) || node.name || '')
         .nodeColor(node => graph3dGetNodeColorHex(node))
         .nodeOpacity(0.9)
         .nodeVal(node => {
@@ -6182,7 +6199,12 @@ async function initDocMenuTable() {
         
         try {
           if (action === 'copy-path') {
-            await copyTextToClipboard(node.name);
+            const pathText = getGraph3dNodeDisplayPath(node) || node.name || '';
+            if (!pathText) {
+              showCopyNotification('コピーできるパスが見つかりません', 'error');
+              return;
+            }
+            await copyTextToClipboard(pathText);
             hideGraph3dContextMenu();
             showCopyNotification('ファイルパスをコピーしました');
           } else if (action === 'copy-name') {
