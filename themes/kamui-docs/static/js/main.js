@@ -1713,6 +1713,7 @@ async function initDocMenuTable() {
         graph3dGlow: null,
         graph3dGlowVersion: GRAPH3D_GLOW_CONFIG_VERSION,
         graph3dGlowControlsOpen: false,
+        graph3dActiveHighlightColor: null,
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
@@ -1731,6 +1732,13 @@ async function initDocMenuTable() {
         text: '#70a1ff',
         doc: '#2f3542'
       };
+      const GRAPH3D_HIGHLIGHT_PALETTES = Object.freeze([
+        { key: 'cyan', label: 'シアン', color: '#00d5ff' },
+        { key: 'magenta', label: 'マゼンタ', color: '#ff6bd5' },
+        { key: 'amber', label: 'アンバー', color: '#ffb547' },
+        { key: 'emerald', label: 'エメラルド', color: '#33d17a' },
+        { key: 'violet', label: 'バイオレット', color: '#9c6bff' }
+      ]);
       const GRAPH3D_TYPE_LABELS = {
         root: 'ルート',
         folder: 'フォルダ',
@@ -1781,6 +1789,8 @@ async function initDocMenuTable() {
       let graph3dHighlightRafId = null;
       let graph3dHighlightGeometry = null;
       let graph3dHighlightSpriteTexture = null;
+      let graph3dHighlightColorByPath = new Map();
+      let graph3dHighlightColorByNode = new Map();
       let graph3dIndexedBaseDir = null;
       let graph3dRenderer = null;
       let graph3dSceneLights = [];
@@ -1788,6 +1798,8 @@ async function initDocMenuTable() {
       let graph3dDimToggleEl = null;
       let graph3dGlowToggleEl = null;
       let graph3dGlowControlsEl = null;
+      let graph3dHighlightPickerEl = null;
+      let graph3dPaletteBarEl = null;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
@@ -2098,6 +2110,179 @@ async function initDocMenuTable() {
         return graph3dNodesByPath.get(normalized) || graph3dNodesByLowerPath.get(normalized.toLowerCase()) || null;
       }
 
+      function getDefaultHighlightColorKey() {
+        return GRAPH3D_HIGHLIGHT_PALETTES[0]?.key || 'cyan';
+      }
+
+      function normalizeHighlightColorKey(rawKey) {
+        const key = typeof rawKey === 'string' ? rawKey.trim().toLowerCase() : '';
+        if (GRAPH3D_HIGHLIGHT_PALETTES.some(palette => palette.key === key)) {
+          return key;
+        }
+        return getDefaultHighlightColorKey();
+      }
+
+      function ensureActiveHighlightColor() {
+        const current = state.graph3dActiveHighlightColor;
+        const normalized = normalizeHighlightColorKey(current);
+        if (current !== normalized) {
+          state.graph3dActiveHighlightColor = normalized;
+        }
+        return normalized;
+      }
+
+      function getGraph3dHighlightPalette(rawKey) {
+        const key = normalizeHighlightColorKey(rawKey);
+        return GRAPH3D_HIGHLIGHT_PALETTES.find(palette => palette.key === key) || GRAPH3D_HIGHLIGHT_PALETTES[0];
+      }
+
+      function getGraph3dHighlightColorHex(rawKey) {
+        const palette = getGraph3dHighlightPalette(rawKey);
+        return palette?.color || '#00d5ff';
+      }
+
+      function getGraph3dHighlightLabel(rawKey) {
+        const palette = getGraph3dHighlightPalette(rawKey);
+        return palette?.label || '';
+      }
+
+      function normalizeHighlightPathFromNode(node) {
+        if (!node || typeof node !== 'object') return null;
+        const rawPath = getGraph3dNodeDisplayPath(node);
+        const normalized = normalizeFsPath(rawPath);
+        if (normalized) return normalized;
+        if (node.id != null) return `__node:${node.id}`;
+        return null;
+      }
+
+      function getGraph3dHighlightCounts() {
+        const counts = Object.create(null);
+        graph3dHighlightColorByPath.forEach((colorKey) => {
+          const normalized = normalizeHighlightColorKey(colorKey);
+          counts[normalized] = (counts[normalized] || 0) + 1;
+        });
+        return counts;
+      }
+
+      function getGraph3dHighlightPaths(colorKey) {
+        const target = normalizeHighlightColorKey(colorKey);
+        const paths = [];
+        graph3dHighlightColorByPath.forEach((value, path) => {
+          if (normalizeHighlightColorKey(value) === target) {
+            paths.push(path);
+          }
+        });
+        return paths;
+      }
+
+      function rebuildGraph3dManualHighlightsForCurrentNodes(options = {}) {
+        const { persistOnChange = true } = options || {};
+        graph3dManualHighlightNodeIds.clear();
+        graph3dHighlightColorByNode.clear();
+        const hasGraphData = graph3dDataCache && Array.isArray(graph3dDataCache.nodes) && graph3dDataCache.nodes.length > 0;
+        if (!hasGraphData) return;
+        let changed = false;
+        const entries = Array.from(graph3dHighlightColorByPath.entries());
+        entries.forEach(([path, colorKey]) => {
+          const node = findGraph3dNodeByPath(path);
+          if (node && node.id != null) {
+            const normalizedColor = normalizeHighlightColorKey(colorKey);
+            graph3dManualHighlightNodeIds.add(node.id);
+            graph3dHighlightColorByNode.set(node.id, normalizedColor);
+          } else {
+            graph3dHighlightColorByPath.delete(path);
+            changed = true;
+          }
+        });
+        if (changed) {
+          if (persistOnChange) schedulePersist();
+          updateHighlightPaletteUI();
+        }
+      }
+
+      function updateHighlightPickerUI() {
+        if (!graph3dHighlightPickerEl) return;
+        const activeKey = ensureActiveHighlightColor();
+        const counts = getGraph3dHighlightCounts();
+        const buttons = graph3dHighlightPickerEl.querySelectorAll('[data-color-key]');
+        buttons.forEach((button) => {
+          const key = button.getAttribute('data-color-key');
+          const palette = getGraph3dHighlightPalette(key);
+          const isActive = key === activeKey;
+          button.style.setProperty('--tb-highlight-color', palette.color);
+          button.classList.toggle('is-active', isActive);
+          button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+          button.setAttribute('title', `${palette.label} (${counts[key] || 0})`);
+        });
+      }
+
+      function updatePaletteBarUI() {
+        if (!graph3dPaletteBarEl) return;
+        const counts = getGraph3dHighlightCounts();
+        const buttons = graph3dPaletteBarEl.querySelectorAll('[data-palette-key]');
+        buttons.forEach((button) => {
+          const key = button.getAttribute('data-palette-key');
+          const palette = getGraph3dHighlightPalette(key);
+          button.style.setProperty('--tb-palette-color', palette.color);
+          const count = counts[key] || 0;
+          const countEl = button.querySelector('.tb-palette-count');
+          if (countEl) countEl.textContent = count;
+          button.classList.toggle('is-empty', count === 0);
+          button.setAttribute('data-count', String(count));
+          button.setAttribute('title', count ? `${palette.label} (${count}件)` : `${palette.label} (未登録)`);
+        });
+      }
+
+      function updateHighlightPaletteUI() {
+        updateHighlightPickerUI();
+        updatePaletteBarUI();
+      }
+
+      function setActiveHighlightColor(colorKey, options = {}) {
+        const { persist = true } = options || {};
+        const normalized = normalizeHighlightColorKey(colorKey);
+        if (state.graph3dActiveHighlightColor === normalized) {
+          updateHighlightPickerUI();
+          return;
+        }
+        state.graph3dActiveHighlightColor = normalized;
+        updateHighlightPickerUI();
+        if (persist) schedulePersist();
+      }
+
+      function toggleGraph3dManualHighlight(node, explicitColorKey = null) {
+        if (!node || typeof node !== 'object') {
+          return { changed: false, action: 'none', color: null };
+        }
+        const pathKey = normalizeHighlightPathFromNode(node);
+        if (!pathKey) {
+          return { changed: false, action: 'none', color: null };
+        }
+        const targetColor = normalizeHighlightColorKey(explicitColorKey || ensureActiveHighlightColor());
+        const currentColor = graph3dHighlightColorByPath.get(pathKey);
+        let action = 'none';
+        if (currentColor && normalizeHighlightColorKey(currentColor) === targetColor) {
+          graph3dHighlightColorByPath.delete(pathKey);
+          if (node.id != null) {
+            graph3dManualHighlightNodeIds.delete(node.id);
+            graph3dHighlightColorByNode.delete(node.id);
+          }
+          action = 'removed';
+        } else {
+          graph3dHighlightColorByPath.set(pathKey, targetColor);
+          if (node.id != null) {
+            graph3dManualHighlightNodeIds.add(node.id);
+            graph3dHighlightColorByNode.set(node.id, targetColor);
+          }
+          action = currentColor ? 'color' : 'added';
+        }
+        updateHighlightPaletteUI();
+        if (action !== 'none') schedulePersist();
+        return { changed: action !== 'none', action, color: targetColor };
+      }
+
+      ensureActiveHighlightColor();
+
       function registerGraph3dHighlightMesh(mesh) {
         if (!mesh) return;
         if (typeof mesh.traverse !== 'function') return;
@@ -2353,7 +2538,7 @@ async function initDocMenuTable() {
         return graph3dHighlightSpriteTexture;
       }
 
-      function createGraph3dHighlightMesh(node, { variant = 'highlight' } = {}) {
+      function createGraph3dHighlightMesh(node, { variant = 'highlight', color = null } = {}) {
         if (!window.THREE) return null;
         if (!graph3dHighlightGeometry) {
           graph3dHighlightGeometry = new THREE.SphereGeometry(1, 48, 48);
@@ -2398,11 +2583,15 @@ async function initDocMenuTable() {
         const spriteWeight = isAmbient
           ? 0.85 + (baseValue + ampValue) * 0.4
           : 1.1 + ampValue * 0.4 + baseValue * 0.3;
-        const highlightPrimaryColor = '#00d5ff';
-        const spriteColor = isAmbient ? '#8fe7ff' : highlightPrimaryColor;
+        const highlightPrimaryColor = color || getGraph3dHighlightColorHex(null);
+        const ambientTint = graph3dMixHexColors(highlightPrimaryColor, '#ffffff', 0.45);
+        const spriteColor = isAmbient ? ambientTint : highlightPrimaryColor;
+        const innerColor = isAmbient
+          ? graph3dMixHexColors(highlightPrimaryColor, '#ffffff', 0.7)
+          : highlightPrimaryColor;
 
         const innerMaterial = new THREE.MeshBasicMaterial({
-          color: isAmbient ? '#d9f7ff' : highlightPrimaryColor,
+          color: innerColor,
           transparent: true,
           opacity: innerOpacity,
           depthWrite: false,
@@ -2499,7 +2688,9 @@ async function initDocMenuTable() {
         return true;
       }
 
-      function applyGraph3dHighlightNodes() {
+      function applyGraph3dHighlightNodes(options = {}) {
+        const { forceRefresh = false } = options || {};
+        rebuildGraph3dManualHighlightsForCurrentNodes();
         const manualIds = graph3dManualHighlightNodeIds;
         const hasManual = manualIds.size > 0;
 
@@ -2512,6 +2703,8 @@ async function initDocMenuTable() {
             } else if (!hasManual) {
               clearGraph3dHighlightMeshes();
             }
+          } else if (forceRefresh && graph3dInstance) {
+            refreshGraph3dNodeObjects({ force: true });
           } else if (!graph3dInstance && !hasManual) {
             clearGraph3dHighlightMeshes();
           }
@@ -2575,6 +2768,8 @@ async function initDocMenuTable() {
           if (graph3dInstance) {
             refreshGraph3dNodeObjects({ force: true });
           }
+        } else if (forceRefresh && graph3dInstance) {
+          refreshGraph3dNodeObjects({ force: true });
         }
         updateGraph3dBloomIntensity();
       }
@@ -3929,6 +4124,8 @@ async function initDocMenuTable() {
             graph3dGlow: { ...getGraph3dGlowConfig() },
             graph3dGlowVersion: GRAPH3D_GLOW_CONFIG_VERSION,
             graph3dGlowControlsOpen: state.graph3dGlowControlsOpen === true,
+            graph3dManualHighlights: Array.from(graph3dHighlightColorByPath.entries()),
+            graph3dActiveHighlightColor: ensureActiveHighlightColor(),
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -4006,6 +4203,19 @@ async function initDocMenuTable() {
           }
           if (saved.composeUrgency) {
             state.composeUrgency = normalizePriorityLevel(saved.composeUrgency, 'medium');
+          }
+          if (Array.isArray(saved.graph3dManualHighlights)) {
+            graph3dHighlightColorByPath.clear();
+            saved.graph3dManualHighlights.forEach((entry) => {
+              if (!Array.isArray(entry) || entry.length < 2) return;
+              const [rawPath, rawColor] = entry;
+              const normalizedPath = normalizeFsPath(rawPath);
+              if (!normalizedPath) return;
+              graph3dHighlightColorByPath.set(normalizedPath, normalizeHighlightColorKey(rawColor));
+            });
+          }
+          if (typeof saved.graph3dActiveHighlightColor === 'string') {
+            state.graph3dActiveHighlightColor = normalizeHighlightColorKey(saved.graph3dActiveHighlightColor);
           }
           if (Array.isArray(saved.tasks)) {
             const revived = saved.tasks.map(hydrateCachedTask).filter(Boolean);
@@ -4334,6 +4544,17 @@ async function initDocMenuTable() {
                 <button type="button" id="taskboard3dModeMedia" class="tb-3d-mode-btn is-active" data-mode="media">メディア</button>
                 <button type="button" id="taskboard3dModeColor" class="tb-3d-mode-btn" data-mode="color">カラー</button>
               </div>
+              <div class="tb-3d-highlight-section">
+                <div class="tb-3d-highlight-header">ハイライト色</div>
+                <div class="tb-3d-highlight-picker" id="taskboard3dHighlightPicker" role="radiogroup" aria-label="ハイライト色の選択">
+                  ${GRAPH3D_HIGHLIGHT_PALETTES.map((palette) => (
+                    `<button type="button" class="tb-3d-highlight-btn" data-color-key="${palette.key}" style="--tb-highlight-color: ${palette.color};" aria-pressed="false">
+                      <span class="tb-3d-highlight-dot" aria-hidden="true"></span>
+                      <span class="tb-3d-highlight-label">${palette.label}</span>
+                    </button>`
+                  )).join('')}
+                </div>
+              </div>
               <div class="tb-3d-base">ベースディレクトリ: <code id="taskboard3dBase">-</code></div>
               <dl class="tb-3d-meta">
                 <dt>名前</dt><dd id="taskboard3dNodeName">-</dd>
@@ -4382,6 +4603,15 @@ async function initDocMenuTable() {
             <button type="button" id="taskboardHold" class="tb-hold" aria-label="保留">保留</button>
           </div>
         </div>
+        <div class="tb-compose-palettes" id="taskboardPaletteBar" aria-label="色別ファイルグループ">
+          ${GRAPH3D_HIGHLIGHT_PALETTES.map((palette) => (
+            `<button type="button" class="tb-palette-btn" data-palette-key="${palette.key}" style="--tb-palette-color: ${palette.color};">
+              <span class="tb-palette-swatch" aria-hidden="true"></span>
+              <span class="tb-palette-label">${palette.label}</span>
+              <span class="tb-palette-count">0</span>
+            </button>`
+          )).join('')}
+        </div>
       </div>
     `;
 
@@ -4416,6 +4646,28 @@ async function initDocMenuTable() {
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
     graph3dGlowToggleEl = panel.querySelector('#taskboard3dGlowToggle');
     graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
+    graph3dHighlightPickerEl = panel.querySelector('#taskboard3dHighlightPicker');
+    graph3dPaletteBarEl = panel.querySelector('#taskboardPaletteBar');
+    if (graph3dHighlightPickerEl && !graph3dHighlightPickerEl._tbBound) {
+      graph3dHighlightPickerEl.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-color-key]');
+        if (!button) return;
+        const key = button.getAttribute('data-color-key');
+        setActiveHighlightColor(key);
+      });
+      graph3dHighlightPickerEl._tbBound = true;
+    }
+    if (graph3dPaletteBarEl && !graph3dPaletteBarEl._tbBound) {
+      graph3dPaletteBarEl.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-palette-key]');
+        if (!button) return;
+        const key = button.getAttribute('data-palette-key');
+        if (!key) return;
+        insertPaletteFilesIntoChat(key);
+      });
+      graph3dPaletteBarEl._tbBound = true;
+    }
+    updateHighlightPaletteUI();
     initializeGraph3dSearchUI();
     bindGraph3dSearchEvents();
     bindGraph3dGlowControls();
@@ -4436,6 +4688,33 @@ async function initDocMenuTable() {
     const hideEl  = panel.querySelector('.tb-hide');
     modelToggleEl = panel.querySelector('#taskboardModelBadge');
     syncStatusEl = panel.querySelector('#taskboardSyncStatus');
+
+    function insertPaletteFilesIntoChat(colorKey) {
+      const palette = getGraph3dHighlightPalette(colorKey);
+      const paths = getGraph3dHighlightPaths(colorKey);
+      if (!paths.length) {
+        showCopyNotification(`${palette.label}に紐づくファイルはありません`, 'error');
+        return;
+      }
+      if (!inputEl) {
+        showCopyNotification('チャット欄が見つかりません', 'error');
+        return;
+      }
+      const header = `【${palette.label}】`;
+      const body = paths.map(path => `- ${path}`).join('\n');
+      const snippet = `${header}\n${body}`;
+      const currentValue = inputEl.value || '';
+      const needsLeadingNewline = currentValue && !/\n$/.test(currentValue);
+      const insertion = needsLeadingNewline ? `\n${snippet}` : snippet;
+      const start = typeof inputEl.selectionStart === 'number' ? inputEl.selectionStart : currentValue.length;
+      const end = typeof inputEl.selectionEnd === 'number' ? inputEl.selectionEnd : currentValue.length;
+      const nextValue = currentValue.slice(0, start) + insertion + currentValue.slice(end);
+      inputEl.value = nextValue;
+      const cursor = start + insertion.length;
+      try { inputEl.setSelectionRange(cursor, cursor); } catch (_) {}
+      inputEl.focus();
+      showCopyNotification('チャット欄にファイル群を挿入しました');
+    }
 
     function formatNumber(value) {
       const num = Number(value);
@@ -4879,7 +5158,8 @@ async function initDocMenuTable() {
         fillHex = graph3dMixHexColors(baseHex, '#ffffff', 0.5);
       }
 
-      const highlightColor = '#00d5ff';
+      const nodeHighlightKey = node && node.id != null ? graph3dHighlightColorByNode.get(node.id) : null;
+      const highlightColor = getGraph3dHighlightColorHex(nodeHighlightKey);
       const ambientMix = ambientActive ? Math.min(0.18, 0.08 + ambientBase * 0.22) : 0.05;
       fillHex = graph3dMixHexColors(fillHex, '#dff5ff', ambientMix);
       let emissiveHex = ambientActive
@@ -5227,6 +5507,8 @@ async function initDocMenuTable() {
       const isHighlighted = graph3dActiveHighlightNodeIds.has(node.id);
       const ambientActive = state.graph3dDimInactive === false;
       const shouldGlow = isHighlighted || ambientActive;
+      const nodeHighlightKey = node && node.id != null ? graph3dHighlightColorByNode.get(node.id) : null;
+      const highlightHex = getGraph3dHighlightColorHex(nodeHighlightKey);
       
       // Bloomレイヤーの設定
       if (baseObject && graph3dBloomLayer) {
@@ -5243,7 +5525,10 @@ async function initDocMenuTable() {
       
       const container = new THREE.Group();
       if (baseObject) container.add(baseObject);
-      const highlightMesh = createGraph3dHighlightMesh(node, { variant: isHighlighted ? 'highlight' : 'ambient' });
+      const highlightMesh = createGraph3dHighlightMesh(node, {
+        variant: isHighlighted ? 'highlight' : 'ambient',
+        color: highlightHex
+      });
       if (highlightMesh) {
         container.add(highlightMesh);
         registerGraph3dHighlightMesh(highlightMesh);
@@ -5738,6 +6023,7 @@ async function initDocMenuTable() {
       graph3dVideoResources.clear();
       graph3dNodeObjectCache.clear();
       graph3dManualHighlightNodeIds.clear();
+      graph3dHighlightColorByNode.clear();
       graph3dLastNodeClick = null;
       graph3dBloomPass = null;
       graph3dRenderer = null;
@@ -5838,12 +6124,10 @@ async function initDocMenuTable() {
           applyGraph3dInfo(node);
         }
         if (state.graph3dDimInactive !== false && node.id != null) {
-          if (graph3dManualHighlightNodeIds.has(node.id)) {
-            graph3dManualHighlightNodeIds.delete(node.id);
-          } else {
-            graph3dManualHighlightNodeIds.add(node.id);
+          const toggleResult = toggleGraph3dManualHighlight(node);
+          if (toggleResult && toggleResult.changed) {
+            applyGraph3dHighlightNodes({ forceRefresh: toggleResult.action === 'color' });
           }
-          applyGraph3dHighlightNodes();
         }
         syncGraph3dSearchHighlightByNode(node);
         graph3dAutoFitLocked = true;
@@ -6042,12 +6326,14 @@ async function initDocMenuTable() {
           const data = await res.json();
           graph3dDataCache = data;
           indexGraph3dNodePaths();
+          rebuildGraph3dManualHighlightsForCurrentNodes({ persistOnChange: false });
           const nodeCount = Array.isArray(data?.nodes) ? data.nodes.length : 0;
           const linkCount = Array.isArray(data?.links) ? data.links.length : 0;
           console.log('[Taskboard][3D] graph data', { nodes: nodeCount, links: linkCount, baseDir: data?.baseDir });
           if (graph3dBaseEl) graph3dBaseEl.textContent = data.baseDir || '-';
           updateGraph3dStats(data.stats, data.totals);
           setupGraph3dScene(ForceGraphFactory, data);
+          updateHighlightPaletteUI();
           applyGraph3dHighlightNodes();
           if (!nodeCount || nodeCount <= 1) {
             graph3dSetStatus('表示できるノードがありません。SCAN_PATHの内容を確認してください。', 'info');
@@ -6163,6 +6449,7 @@ async function initDocMenuTable() {
     }
 
     function renderGraph3dPanel() {
+      updateHighlightPaletteUI();
       updateGraph3dToggleLabel();
       updateGraph3dModeToggle();
       updateGraph3dInfoVisibility();
