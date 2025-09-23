@@ -4785,7 +4785,6 @@ async function initDocMenuTable() {
           ${GRAPH3D_HIGHLIGHT_PALETTES.map((palette) => (
             `<button type="button" class="tb-palette-btn" data-palette-key="${palette.key}" style="--tb-palette-color: ${palette.color};">
               <span class="tb-palette-swatch" aria-hidden="true"></span>
-              <span class="tb-palette-label">${palette.label}</span>
               <span class="tb-palette-count">0</span>
             </button>`
           )).join('')}
