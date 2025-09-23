@@ -345,7 +345,7 @@ pre.code code { color: var(--text); }
 
 /* グラフ3D用コンテキストメニュー */
 .graph3d-context-menu {
-  min-width: 180px;
+  min-width: 240px;
 }
 
 /* コピー通知用アニメーション */

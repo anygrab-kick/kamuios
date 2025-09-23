@@ -1746,6 +1746,7 @@ async function initDocMenuTable() {
         other: 'その他'
       };
       const GRAPH3D_SEARCH_LIMIT = 50;
+      const GRAPH3D_DOUBLE_CLICK_MS = 420;
       const externalScriptPromises = Object.create(null);
       let graph3dInstance = null;
       let graph3dDataCache = null;
@@ -1774,6 +1775,7 @@ async function initDocMenuTable() {
       let graph3dNodesByPath = new Map();
       let graph3dNodesByLowerPath = new Map();
       let graph3dActiveTaskPaths = new Set();
+      let graph3dManualHighlightNodeIds = new Set();
       let graph3dActiveHighlightNodeIds = new Set();
       let graph3dHighlightMeshes = new Set();
       let graph3dHighlightRafId = null;
@@ -1782,6 +1784,7 @@ async function initDocMenuTable() {
       let graph3dIndexedBaseDir = null;
       let graph3dRenderer = null;
       let graph3dSceneLights = [];
+      let graph3dLastNodeClick = null;
       let graph3dDimToggleEl = null;
       let graph3dGlowToggleEl = null;
       let graph3dGlowControlsEl = null;
@@ -2497,24 +2500,30 @@ async function initDocMenuTable() {
       }
 
       function applyGraph3dHighlightNodes() {
+        const manualIds = graph3dManualHighlightNodeIds;
+        const hasManual = manualIds.size > 0;
+
         if (!graph3dActiveTaskPaths.size) {
-          if (graph3dActiveHighlightNodeIds.size) {
-            graph3dActiveHighlightNodeIds = new Set();
+          const nextIds = hasManual ? new Set(manualIds) : new Set();
+          if (!setsEqual(nextIds, graph3dActiveHighlightNodeIds)) {
+            graph3dActiveHighlightNodeIds = nextIds;
             if (graph3dInstance) {
               refreshGraph3dNodeObjects({ force: true });
-            } else {
+            } else if (!hasManual) {
               clearGraph3dHighlightMeshes();
             }
-          } else {
+          } else if (!graph3dInstance && !hasManual) {
             clearGraph3dHighlightMeshes();
           }
-        updateGraph3dBloomIntensity();
-        return;
-      }
-      if (!graph3dDataCache || !Array.isArray(graph3dDataCache.nodes) || !graph3dDataCache.nodes.length) {
-        updateGraph3dBloomIntensity();
-        return;
-      }
+          updateGraph3dBloomIntensity();
+          return;
+        }
+
+        if (!graph3dDataCache || !Array.isArray(graph3dDataCache.nodes) || !graph3dDataCache.nodes.length) {
+          updateGraph3dBloomIntensity();
+          return;
+        }
+
         if (!graph3dNodesByPath.size) {
           indexGraph3dNodePaths();
         }
@@ -2556,6 +2565,11 @@ async function initDocMenuTable() {
             nextIds.add(matched.id);
           }
         });
+
+        manualIds.forEach((id) => {
+          if (id != null) nextIds.add(id);
+        });
+
         if (!setsEqual(nextIds, graph3dActiveHighlightNodeIds)) {
           graph3dActiveHighlightNodeIds = nextIds;
           if (graph3dInstance) {
@@ -5723,6 +5737,8 @@ async function initDocMenuTable() {
       });
       graph3dVideoResources.clear();
       graph3dNodeObjectCache.clear();
+      graph3dManualHighlightNodeIds.clear();
+      graph3dLastNodeClick = null;
       graph3dBloomPass = null;
       graph3dRenderer = null;
       resetGraph3dBloom();
@@ -5743,6 +5759,23 @@ async function initDocMenuTable() {
       graph3dInstance = Graph;
       graph3dAutoFitLocked = false;
       graph3dHasInitialFit = false;
+      const focusGraph3dCameraOnNode = (targetNode, { distance = 180, duration = 600 } = {}) => {
+        if (!targetNode || !Graph || typeof Graph.cameraPosition !== 'function') return;
+        const camera = typeof Graph.camera === 'function' ? Graph.camera() : null;
+        if (!camera) return;
+        const x = targetNode.x || 0;
+        const y = targetNode.y || 0;
+        const z = targetNode.z || 0;
+        const baseDistance = Number.isFinite(distance) ? distance : 180;
+        const length = Math.max(Math.hypot(x, y, z), 1);
+        const ratio = 1 + baseDistance / length;
+        const animDuration = Number.isFinite(duration) ? duration : 600;
+        Graph.cameraPosition({
+          x: x * ratio,
+          y: y * ratio,
+          z: z * ratio
+        }, targetNode, animDuration);
+      };
       try {
         const controls = Graph.controls && Graph.controls();
         if (controls && typeof controls.addEventListener === 'function') {
@@ -5786,8 +5819,17 @@ async function initDocMenuTable() {
           stopGraph3dActiveVideo();
         }
       });
-      Graph.onNodeClick(node => {
+      Graph.onNodeClick((node) => {
         if (!node) return;
+        const now = (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+        const lastClick = graph3dLastNodeClick;
+        const isDoubleClick = !!(lastClick && lastClick.nodeId === node.id && (now - lastClick.time) <= GRAPH3D_DOUBLE_CLICK_MS);
+        graph3dLastNodeClick = { nodeId: node.id, time: now };
+        if (isDoubleClick) {
+          graph3dAutoFitLocked = true;
+          focusGraph3dCameraOnNode(node);
+          return;
+        }
         if (graph3dPinnedNode && graph3dPinnedNode.id === node.id) {
           graph3dPinnedNode = null;
           applyGraph3dInfo(node);
@@ -5795,17 +5837,16 @@ async function initDocMenuTable() {
           graph3dPinnedNode = node;
           applyGraph3dInfo(node);
         }
+        if (state.graph3dDimInactive !== false && node.id != null) {
+          if (graph3dManualHighlightNodeIds.has(node.id)) {
+            graph3dManualHighlightNodeIds.delete(node.id);
+          } else {
+            graph3dManualHighlightNodeIds.add(node.id);
+          }
+          applyGraph3dHighlightNodes();
+        }
         syncGraph3dSearchHighlightByNode(node);
         graph3dAutoFitLocked = true;
-        const camera = Graph.camera();
-        if (!camera) return;
-        const distance = 180;
-        const x = node.x || 0;
-        const y = node.y || 0;
-        const z = node.z || 0;
-        const length = Math.max(Math.hypot(x, y, z), 1);
-        const ratio = 1 + distance / length;
-        Graph.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, node, 600);
       });
 
       // ノードの右クリックイベントを追加
@@ -6182,8 +6223,8 @@ async function initDocMenuTable() {
         <button type="button" class="tb-context-item" data-action="copy-path">
           <span>ファイルパスをコピー</span>
         </button>
-        <button type="button" class="tb-context-item" data-action="copy-name">
-          <span>ファイル名をコピー</span>
+        <button type="button" class="tb-context-item" data-action="insert-path">
+          <span>ファイルパスをチャットに挿入</span>
         </button>
       `;
       document.body.appendChild(graph3dContextMenu);
@@ -6207,11 +6248,28 @@ async function initDocMenuTable() {
             await copyTextToClipboard(pathText);
             hideGraph3dContextMenu();
             showCopyNotification('ファイルパスをコピーしました');
-          } else if (action === 'copy-name') {
-            const fileName = node.name.split('/').pop() || node.name;
-            await copyTextToClipboard(fileName);
+          } else if (action === 'insert-path') {
+            const pathText = getGraph3dNodeDisplayPath(node) || node.name || '';
+            if (!pathText) {
+              showCopyNotification('チャットに挿入できるパスが見つかりません', 'error');
+              return;
+            }
+            if (!inputEl) {
+              showCopyNotification('チャット欄が見つかりません', 'error');
+              return;
+            }
+            const currentValue = inputEl.value || '';
+            const start = typeof inputEl.selectionStart === 'number' ? inputEl.selectionStart : currentValue.length;
+            const end = typeof inputEl.selectionEnd === 'number' ? inputEl.selectionEnd : currentValue.length;
+            const nextValue = currentValue.slice(0, start) + pathText + currentValue.slice(end);
+            inputEl.value = nextValue;
+            const cursor = start + pathText.length;
+            try {
+              inputEl.setSelectionRange(cursor, cursor);
+            } catch (_) {}
+            inputEl.focus();
             hideGraph3dContextMenu();
-            showCopyNotification('ファイル名をコピーしました');
+            showCopyNotification('チャット欄にファイルパスを挿入しました');
           }
         } catch (err) {
           console.error('コピーに失敗しました:', err);
