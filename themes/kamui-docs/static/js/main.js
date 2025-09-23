@@ -1689,6 +1689,8 @@ async function initDocMenuTable() {
         const title = `${label}: ${priorityLabel(normalized)}`;
         return `<span class="tb-priority-badge ${priorityClass(normalized)}" data-kind="${kind}" title="${escapeAttr(title)}">${priorityIconSvg(kind, normalized)}<span class="tb-priority-text">${escapeHtml(priorityLabel(normalized))}</span></span>`;
       }
+      const GRAPH3D_GLOW_CONFIG_VERSION = 2;
+
       const state = {
         open: false,
         tasks: [],
@@ -1709,6 +1711,8 @@ async function initDocMenuTable() {
         graph3dDimInactive: true,
         graph3dInfoCollapsed: true,
         graph3dGlow: null,
+        graph3dGlowVersion: GRAPH3D_GLOW_CONFIG_VERSION,
+        graph3dGlowControlsOpen: false,
         composeImportance: 'medium',
         composeUrgency: 'medium',
         expandedTaskIds: new Set()
@@ -1779,6 +1783,7 @@ async function initDocMenuTable() {
       let graph3dRenderer = null;
       let graph3dSceneLights = [];
       let graph3dDimToggleEl = null;
+      let graph3dGlowToggleEl = null;
       let graph3dGlowControlsEl = null;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
@@ -1807,8 +1812,7 @@ async function initDocMenuTable() {
       const HOURS_IN_DAY = 24;
       const HEATMAP_HOURS = Array.from({ length: HOURS_IN_DAY }, (_, i) => i);
       const TASK_TIMEZONE = 'Asia/Tokyo';
-      const GRAPH3D_BLOOM_DEFAULT = { strength: 1.5, radius: 0.5, threshold: 0.0 };
-      const GRAPH3D_BLOOM_HIGHLIGHT = { strength: 3.0, radius: 0.8, threshold: 0.0 };
+      const GRAPH3D_BLOOM_DEFAULT = { strength: 0.66, radius: 1, threshold: 0.0 };
       const GRAPH3D_GLOW_DEFAULTS = Object.freeze({
         highlightBase: 0.6,
         highlightAmp: 0.36,
@@ -1816,8 +1820,10 @@ async function initDocMenuTable() {
         ambientBase: 0.32,
         ambientAmp: 0.24,
         ambientSpeed: 1.15,
-        bloomDefaultStrength: GRAPH3D_BLOOM_DEFAULT.strength,
-        bloomHighlightStrength: GRAPH3D_BLOOM_HIGHLIGHT.strength
+        bloomThreshold: GRAPH3D_BLOOM_DEFAULT.threshold,
+        bloomStrength: GRAPH3D_BLOOM_DEFAULT.strength,
+        bloomRadius: GRAPH3D_BLOOM_DEFAULT.radius,
+        exposure: 0.8322
       });
       const GRAPH3D_GLOW_RANGES = Object.freeze({
         highlightBase: [0.05, 1.2],
@@ -1826,11 +1832,24 @@ async function initDocMenuTable() {
         ambientBase: [0, 1],
         ambientAmp: [0, 1.2],
         ambientSpeed: [0.1, 4],
-        bloomDefaultStrength: [0, 5],
-        bloomHighlightStrength: [0, 6]
+        bloomThreshold: [0, 1],
+        bloomStrength: [0, 10],
+        bloomRadius: [0, 3],
+        exposure: [0.2, 2.5]
+      });
+      const GRAPH3D_GLOW_TIPS = Object.freeze({
+        bloomThreshold: { label: 'Bloom Threshold', description: 'Bloomを適用する最小輝度。値を上げると暗いノードの光が抑えられます。' },
+        bloomStrength: { label: 'Bloom Strength', description: '滲み出る光の強さ。' },
+        bloomRadius: { label: 'Bloom Radius', description: 'Bloomの広がり方。' },
+        exposure: { label: 'Exposure', description: 'シーン全体の露出。' },
+        highlightBase: { label: 'Highlight Base', description: 'ハイライト対象の基本的な光量。' },
+        highlightAmp: { label: 'Highlight Amp', description: 'ハイライトの振幅（明滅幅）。' },
+        highlightSpeed: { label: 'Highlight Speed', description: 'ハイライトの明滅速度。' },
+        ambientBase: { label: 'Ambient Base', description: '実装ハイライトOFF時の基本光量。' },
+        ambientAmp: { label: 'Ambient Amp', description: 'アンビエントの揺らぎ幅。' },
+        ambientSpeed: { label: 'Ambient Speed', description: 'アンビエントの明滅速度。' }
       });
       const GRAPH3D_EXPOSURE_DEFAULT = 1.0;
-      const GRAPH3D_EXPOSURE_HIGHLIGHT = 1.2;
       const GRAPH3D_ENTIRE_SCENE = 0;
       const GRAPH3D_BLOOM_SCENE = 1;
       const GRAPH3D_FOG_COLOR = '#050608';
@@ -2032,15 +2051,25 @@ async function initDocMenuTable() {
           : null;
         const normalized = normalizeGraph3dGlowConfig(current);
         state.graph3dGlow = normalized;
+        state.graph3dGlowVersion = GRAPH3D_GLOW_CONFIG_VERSION;
         return normalized;
       }
 
       function formatGraph3dGlowValue(key, value) {
         if (!Number.isFinite(value)) return '';
-        if (key.startsWith('bloom')) {
-          return value.toFixed(2);
-        }
-        return value.toFixed(2);
+        const rounded = key === 'highlightSpeed' || key === 'ambientSpeed' ? value.toFixed(2)
+          : key === 'exposure' ? value.toFixed(3)
+          : value.toFixed(2);
+        return rounded.replace(/\.0+$/, '').replace(/(\.\d+?)0+$/, '$1');
+      }
+
+      function buildGraph3dGlowTip(key, value) {
+        const meta = GRAPH3D_GLOW_TIPS[key] || {};
+        const label = meta.label || key;
+        const desc = meta.description ? `\n${meta.description}` : '';
+        const formatted = Number.isFinite(value) ? formatGraph3dGlowValue(key, value) : '';
+        const valueText = formatted ? `: ${formatted}` : '';
+        return `${label}${valueText}${desc}`;
       }
 
       function findGraph3dNodeByPath(pathValue) {
@@ -2147,30 +2176,38 @@ async function initDocMenuTable() {
         const hasHighlight = graph3dActiveHighlightNodeIds.size > 0;
         const glowConfig = getGraph3dGlowConfig();
         const ambientActive = state.graph3dDimInactive === false;
-        const target = (hasHighlight || ambientActive)
-          ? { ...GRAPH3D_BLOOM_HIGHLIGHT, strength: glowConfig.bloomHighlightStrength }
-          : { ...GRAPH3D_BLOOM_DEFAULT, strength: glowConfig.bloomDefaultStrength };
+        const highlightBase = clampGraph3dValue(glowConfig.highlightBase, GRAPH3D_GLOW_RANGES.highlightBase[0], GRAPH3D_GLOW_RANGES.highlightBase[1]);
+        const highlightAmp = clampGraph3dValue(glowConfig.highlightAmp, GRAPH3D_GLOW_RANGES.highlightAmp[0], GRAPH3D_GLOW_RANGES.highlightAmp[1]);
+        const ambientBase = clampGraph3dValue(glowConfig.ambientBase, GRAPH3D_GLOW_RANGES.ambientBase[0], GRAPH3D_GLOW_RANGES.ambientBase[1]);
+        const ambientAmp = clampGraph3dValue(glowConfig.ambientAmp, GRAPH3D_GLOW_RANGES.ambientAmp[0], GRAPH3D_GLOW_RANGES.ambientAmp[1]);
+
+        const baseStrength = clampGraph3dValue(glowConfig.bloomStrength, GRAPH3D_GLOW_RANGES.bloomStrength[0], GRAPH3D_GLOW_RANGES.bloomStrength[1]);
+        const strengthBoost = hasHighlight ? 1 + highlightBase * 0.6 + highlightAmp * 0.3 : (ambientActive ? 1 + ambientBase * 0.25 + ambientAmp * 0.1 : 1);
+        const targetStrength = baseStrength * strengthBoost;
+        const targetRadius = clampGraph3dValue(glowConfig.bloomRadius, GRAPH3D_GLOW_RANGES.bloomRadius[0], GRAPH3D_GLOW_RANGES.bloomRadius[1]);
+        const targetThreshold = clampGraph3dValue(glowConfig.bloomThreshold, GRAPH3D_GLOW_RANGES.bloomThreshold[0], GRAPH3D_GLOW_RANGES.bloomThreshold[1]);
+
         if (graph3dBloomPass) {
-          graph3dBloomPass.strength = target.strength;
-          graph3dBloomPass.radius = target.radius;
-          graph3dBloomPass.threshold = target.threshold;
+          graph3dBloomPass.strength = targetStrength;
+          graph3dBloomPass.radius = targetRadius;
+          graph3dBloomPass.threshold = targetThreshold;
         }
+
         if (graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number') {
-          const ambientBoost = Math.max(0, Math.min(1.2, glowConfig.ambientBase || 0));
-          const highlightBoost = Math.max(0, Math.min(1.2, glowConfig.highlightBase || 0));
-          const exposure = hasHighlight
-            ? GRAPH3D_EXPOSURE_DEFAULT + 0.16 + highlightBoost * 0.18
-            : ambientActive
-              ? GRAPH3D_EXPOSURE_DEFAULT + 0.08 + ambientBoost * 0.12
-              : GRAPH3D_EXPOSURE_DEFAULT;
-          graph3dRenderer.toneMappingExposure = exposure;
+          const baseExposure = clampGraph3dValue(glowConfig.exposure, GRAPH3D_GLOW_RANGES.exposure[0], GRAPH3D_GLOW_RANGES.exposure[1]);
+          const exposureBoost = hasHighlight
+            ? highlightBase * 0.18 + highlightAmp * 0.08
+            : ambientActive ? ambientBase * 0.12 + ambientAmp * 0.05 : 0;
+          const targetExposure = clampGraph3dValue(baseExposure + exposureBoost, GRAPH3D_GLOW_RANGES.exposure[0], GRAPH3D_GLOW_RANGES.exposure[1]);
+          graph3dRenderer.toneMappingExposure = targetExposure;
         }
+
         try {
           console.debug('[Taskboard][3D][Bloom] intensity update', {
             hasHighlight,
-            strength: target.strength,
-            radius: target.radius,
-            threshold: target.threshold,
+            strength: targetStrength,
+            radius: targetRadius,
+            threshold: targetThreshold,
             exposure: graph3dRenderer && typeof graph3dRenderer.toneMappingExposure === 'number' ? graph3dRenderer.toneMappingExposure : null,
             hasBloomPass: !!graph3dBloomPass,
             ambientActive
@@ -2181,42 +2218,65 @@ async function initDocMenuTable() {
       function updateGraph3dGlowControls() {
         if (!graph3dGlowControlsEl) return;
         const config = getGraph3dGlowConfig();
-        const controls = graph3dGlowControlsEl.querySelectorAll('[data-glow-input]');
-        controls.forEach((input) => {
+        const inputs = graph3dGlowControlsEl.querySelectorAll('[data-glow-input]');
+        inputs.forEach((input) => {
           const key = input.getAttribute('data-glow-key');
           if (!key || !(key in config)) return;
           const value = config[key];
           const formatted = Number.isFinite(value) ? value : GRAPH3D_GLOW_DEFAULTS[key];
-          if (Number.isFinite(formatted)) {
-            const strValue = String(formatted);
-            if (input.value !== strValue) {
-              input.value = strValue;
-            }
-            const valueLabel = graph3dGlowControlsEl.querySelector(`[data-glow-value="${key}"]`);
-            if (valueLabel) {
-              valueLabel.textContent = formatGraph3dGlowValue(key, formatted);
-            }
+          if (!Number.isFinite(formatted)) return;
+          const strValue = String(formatted);
+          if (input.value !== strValue) {
+            input.value = strValue;
           }
+          input.setAttribute('aria-valuenow', formatGraph3dGlowValue(key, formatted));
+          const labelEl = input.closest('[data-glow-control]');
+          const tip = buildGraph3dGlowTip(key, formatted);
+          if (labelEl) {
+            labelEl.setAttribute('data-glow-tip', tip);
+            labelEl.setAttribute('aria-label', tip);
+          }
+          input.setAttribute('title', tip);
         });
       }
 
-      function setGraph3dGlowValue(key, rawValue) {
+      function setGraph3dGlowValue(key, rawValue, options = {}) {
+        const { persist = true } = options || {};
         if (!key || !(key in GRAPH3D_GLOW_DEFAULTS)) return;
         const config = { ...getGraph3dGlowConfig() };
         const [min, max] = GRAPH3D_GLOW_RANGES[key] || [Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY];
         const value = clampGraph3dValue(Number(rawValue), min, max);
         if (!Number.isFinite(value)) return;
+        const previous = config[key];
+        if (previous === value) {
+          const tip = buildGraph3dGlowTip(key, value);
+          const labelEl = graph3dGlowControlsEl && graph3dGlowControlsEl.querySelector(`[data-glow-control][data-glow-key="${key}"]`);
+          if (labelEl) {
+            labelEl.setAttribute('data-glow-tip', tip);
+            labelEl.setAttribute('aria-label', tip);
+          }
+          const inputEl = graph3dGlowControlsEl && graph3dGlowControlsEl.querySelector(`[data-glow-input][data-glow-key="${key}"]`);
+          if (inputEl) {
+            inputEl.setAttribute('title', tip);
+            inputEl.setAttribute('aria-valuenow', formatGraph3dGlowValue(key, value));
+          }
+          if (persist) {
+            schedulePersist();
+          }
+          return;
+        }
         config[key] = value;
         state.graph3dGlow = normalizeGraph3dGlowConfig(config);
-        const isBloomKey = key === 'bloomDefaultStrength' || key === 'bloomHighlightStrength';
-        if (isBloomKey) {
+        state.graph3dGlowVersion = GRAPH3D_GLOW_CONFIG_VERSION;
+        const bloomKeys = new Set(['bloomThreshold', 'bloomStrength', 'bloomRadius', 'exposure']);
+        if (bloomKeys.has(key)) {
           updateGraph3dBloomIntensity();
         } else {
           refreshGraph3dNodeObjects({ force: true });
           applyGraph3dHighlightNodes();
         }
         updateGraph3dGlowControls();
-        schedulePersist();
+        if (persist) schedulePersist();
       }
 
       function handleGraph3dGlowInput(event) {
@@ -2225,17 +2285,15 @@ async function initDocMenuTable() {
         if (!input || !input.dataset || !input.dataset.glowKey) return;
         const key = input.dataset.glowKey;
         const value = Number(input.value);
-        const label = graph3dGlowControlsEl.querySelector(`[data-glow-value="${key}"]`);
-        if (label && Number.isFinite(value)) {
-          label.textContent = formatGraph3dGlowValue(key, value);
-        }
+        if (!Number.isFinite(value)) return;
+        setGraph3dGlowValue(key, value, { persist: false });
       }
 
       function handleGraph3dGlowChange(event) {
         const input = event.target;
         if (!input || !input.dataset || !input.dataset.glowKey) return;
         const key = input.dataset.glowKey;
-        setGraph3dGlowValue(key, Number(input.value));
+        setGraph3dGlowValue(key, Number(input.value), { persist: true });
       }
 
       function bindGraph3dGlowControls() {
@@ -2261,9 +2319,9 @@ async function initDocMenuTable() {
         if (!ctx) return null;
         const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.06, size / 2, size / 2, size * 0.48);
         gradient.addColorStop(0.0, 'rgba(255,255,255,1)');
-        gradient.addColorStop(0.32, 'rgba(255,244,214,0.82)');
-        gradient.addColorStop(0.64, 'rgba(255,193,120,0.35)');
-        gradient.addColorStop(1.0, 'rgba(255,255,255,0)');
+        gradient.addColorStop(0.32, 'rgba(120,235,255,0.9)');
+        gradient.addColorStop(0.64, 'rgba(0,209,255,0.55)');
+        gradient.addColorStop(1.0, 'rgba(0,180,255,0)');
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, size, size);
         const texture = new THREE.Texture(canvas);
@@ -2320,11 +2378,11 @@ async function initDocMenuTable() {
         const spriteWeight = isAmbient
           ? 0.85 + (baseValue + ampValue) * 0.4
           : 1.1 + ampValue * 0.4 + baseValue * 0.3;
-        const highlightPrimaryColor = '#ff9f43';
-        const spriteColor = isAmbient ? '#fff4e4' : highlightPrimaryColor;
+        const highlightPrimaryColor = '#00d5ff';
+        const spriteColor = isAmbient ? '#8fe7ff' : highlightPrimaryColor;
 
         const innerMaterial = new THREE.MeshBasicMaterial({
-          color: isAmbient ? '#ffffff' : highlightPrimaryColor,
+          color: isAmbient ? '#d9f7ff' : highlightPrimaryColor,
           transparent: true,
           opacity: innerOpacity,
           depthWrite: false,
@@ -3838,6 +3896,8 @@ async function initDocMenuTable() {
             graph3dInfoCollapsed: !!state.graph3dInfoCollapsed,
             graph3dDimInactive: state.graph3dDimInactive !== false,
             graph3dGlow: { ...getGraph3dGlowConfig() },
+            graph3dGlowVersion: GRAPH3D_GLOW_CONFIG_VERSION,
+            graph3dGlowControlsOpen: state.graph3dGlowControlsOpen === true,
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
             composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
           };
@@ -3862,6 +3922,7 @@ async function initDocMenuTable() {
         try {
           const saved = storageModule.load();
           if (!saved || typeof saved !== 'object') return;
+          let glowReset = false;
           if (typeof saved.open === 'boolean') state.open = saved.open;
           if (typeof saved.backendBase === 'string' && saved.backendBase) {
             state.backendBase = saved.backendBase;
@@ -3887,9 +3948,19 @@ async function initDocMenuTable() {
           if (typeof saved.graph3dDimInactive === 'boolean') {
             state.graph3dDimInactive = saved.graph3dDimInactive;
           }
-          if (saved.graph3dGlow && typeof saved.graph3dGlow === 'object') {
-            state.graph3dGlow = normalizeGraph3dGlowConfig(saved.graph3dGlow);
+          if (typeof saved.graph3dGlowControlsOpen === 'boolean') {
+            state.graph3dGlowControlsOpen = saved.graph3dGlowControlsOpen;
           }
+          const savedGlowVersion = Number(saved.graph3dGlowVersion);
+          if (saved.graph3dGlow && typeof saved.graph3dGlow === 'object') {
+            if (Number.isFinite(savedGlowVersion) && savedGlowVersion >= GRAPH3D_GLOW_CONFIG_VERSION) {
+              state.graph3dGlow = normalizeGraph3dGlowConfig(saved.graph3dGlow);
+            } else {
+              state.graph3dGlow = null;
+              glowReset = true;
+            }
+          }
+          state.graph3dGlowVersion = GRAPH3D_GLOW_CONFIG_VERSION;
           if (saved.matrixSelection && typeof saved.matrixSelection === 'object') {
             const { importance, urgency } = saved.matrixSelection;
             if (importance && urgency) {
@@ -3916,6 +3987,9 @@ async function initDocMenuTable() {
               state.tasks = revived.slice(0, MAX_TASK_HISTORY);
               state.tasks.forEach(ensureCodexMonitorState);
             }
+          }
+          if (glowReset) {
+            state.graph3dGlowControlsOpen = false;
           }
           // ログは分離キーから取り出す
           try {
@@ -4162,52 +4236,54 @@ async function initDocMenuTable() {
                 <input type="search" id="taskboard3dSearch" class="tb-3d-search-input" placeholder="ファイル・パスを検索" autocomplete="off" spellcheck="false" aria-controls="taskboard3dSearchResults" aria-haspopup="listbox" aria-expanded="false" aria-label="ファイル検索" />
                 <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
                 <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
-                <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true">実装ハイライト ON</button>
-                <div class="tb-3d-glow-controls" id="taskboard3dGlowControls" aria-label="発光設定">
+                <div class="tb-3d-glow-toggle-row">
+                  <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true">実装ハイライト ON</button>
+                  <button type="button" id="taskboard3dGlowToggle" class="tb-3d-glow-toggle" aria-expanded="false" aria-pressed="false" aria-controls="taskboard3dGlowControls" aria-label="発光設定" title="発光設定">
+                    <span class="tb-3d-glow-toggle-icon" aria-hidden="true">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3.2 5.5h13.6" />
+                        <path d="M3.2 14.5h13.6" />
+                        <circle cx="8" cy="5.5" r="2.2" fill="currentColor" stroke="none" opacity="0.8" />
+                        <circle cx="13.2" cy="14.5" r="2.2" fill="currentColor" stroke="none" opacity="0.8" />
+                      </svg>
+                    </span>
+                  </button>
+                </div>
+                <div class="tb-3d-glow-controls" id="taskboard3dGlowControls" aria-label="発光設定" hidden aria-hidden="true">
                   <div class="tb-3d-glow-row">
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">Bloom強度(通常)</span>
-                      <input type="range" min="0" max="5" step="0.05" data-glow-key="bloomDefaultStrength" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="bloomDefaultStrength"></span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="bloomThreshold">
+                      <input type="range" min="0" max="1" step="0.01" data-glow-key="bloomThreshold" data-glow-input>
                     </label>
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">Bloom強度(ハイライト)</span>
-                      <input type="range" min="0" max="6" step="0.05" data-glow-key="bloomHighlightStrength" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="bloomHighlightStrength"></span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="bloomStrength">
+                      <input type="range" min="0" max="10" step="0.05" data-glow-key="bloomStrength" data-glow-input>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="bloomRadius">
+                      <input type="range" min="0" max="3" step="0.01" data-glow-key="bloomRadius" data-glow-input>
+                    </label>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="exposure">
+                      <input type="range" min="0.2" max="2.5" step="0.01" data-glow-key="exposure" data-glow-input>
                     </label>
                   </div>
                   <div class="tb-3d-glow-row tb-3d-glow-row--compact">
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">ハイライト</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="highlightBase">
                       <input type="range" min="0.05" max="1.2" step="0.01" data-glow-key="highlightBase" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="highlightBase"></span>
                     </label>
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">振幅</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="highlightAmp">
                       <input type="range" min="0" max="1.2" step="0.01" data-glow-key="highlightAmp" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="highlightAmp"></span>
                     </label>
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">速度</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="highlightSpeed">
                       <input type="range" min="0.1" max="4" step="0.05" data-glow-key="highlightSpeed" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="highlightSpeed"></span>
                     </label>
                   </div>
                   <div class="tb-3d-glow-row tb-3d-glow-row--compact">
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">アンビエント</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="ambientBase">
                       <input type="range" min="0" max="1" step="0.01" data-glow-key="ambientBase" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="ambientBase"></span>
                     </label>
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">振幅</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="ambientAmp">
                       <input type="range" min="0" max="1.2" step="0.01" data-glow-key="ambientAmp" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="ambientAmp"></span>
                     </label>
-                    <label class="tb-3d-glow-control" data-glow-control>
-                      <span class="tb-3d-glow-label">速度</span>
+                    <label class="tb-3d-glow-control" data-glow-control data-glow-key="ambientSpeed">
                       <input type="range" min="0.1" max="4" step="0.05" data-glow-key="ambientSpeed" data-glow-input>
-                      <span class="tb-3d-glow-value" data-glow-value="ambientSpeed"></span>
                     </label>
                   </div>
                 </div>
@@ -4307,10 +4383,13 @@ async function initDocMenuTable() {
     graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
     graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
+    graph3dGlowToggleEl = panel.querySelector('#taskboard3dGlowToggle');
     graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
     initializeGraph3dSearchUI();
     bindGraph3dSearchEvents();
     bindGraph3dGlowControls();
+    updateGraph3dGlowControlsVisibility();
+    updateGraph3dGlowToggle();
     updateGraph3dInfoVisibility();
     if (!graph3dInfoResizeBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
       const resizeHandler = () => requestAnimationFrame(updateGraph3dInfoVisibility);
@@ -4587,11 +4666,10 @@ async function initDocMenuTable() {
       
       const resolution = new window.THREE.Vector2(width, height);
       const initialGlow = getGraph3dGlowConfig();
-      const bloomDefaults = {
-        ...GRAPH3D_BLOOM_DEFAULT,
-        strength: initialGlow.bloomDefaultStrength
-      };
-      graph3dBloomPass = new bloomPassClass(resolution, bloomDefaults.strength, bloomDefaults.radius, bloomDefaults.threshold);
+      const initialStrength = clampGraph3dValue(initialGlow.bloomStrength ?? GRAPH3D_BLOOM_DEFAULT.strength, GRAPH3D_GLOW_RANGES.bloomStrength[0], GRAPH3D_GLOW_RANGES.bloomStrength[1]);
+      const initialRadius = clampGraph3dValue(initialGlow.bloomRadius ?? GRAPH3D_BLOOM_DEFAULT.radius, GRAPH3D_GLOW_RANGES.bloomRadius[0], GRAPH3D_GLOW_RANGES.bloomRadius[1]);
+      const initialThreshold = clampGraph3dValue(initialGlow.bloomThreshold ?? GRAPH3D_BLOOM_DEFAULT.threshold, GRAPH3D_GLOW_RANGES.bloomThreshold[0], GRAPH3D_GLOW_RANGES.bloomThreshold[1]);
+      graph3dBloomPass = new bloomPassClass(resolution, initialStrength, initialRadius, initialThreshold);
       graph3dBloomComposer.addPass(graph3dBloomPass);
 
       // 最終合成用コンポーザー
@@ -4771,21 +4849,21 @@ async function initDocMenuTable() {
         fillHex = graph3dMixHexColors(baseHex, '#ffffff', 0.5);
       }
 
-      const highlightColor = '#ff9f43';
-      const ambientMix = ambientActive ? Math.min(0.18, 0.08 + ambientBase * 0.22) : 0.12;
-      fillHex = graph3dMixHexColors(fillHex, '#ffffff', ambientMix);
+      const highlightColor = '#00d5ff';
+      const ambientMix = ambientActive ? Math.min(0.18, 0.08 + ambientBase * 0.22) : 0.05;
+      fillHex = graph3dMixHexColors(fillHex, '#dff5ff', ambientMix);
       let emissiveHex = ambientActive
-        ? graph3dMixHexColors(baseHex, '#ffe8c2', Math.min(0.45, 0.24 + ambientAmp * 0.3))
-        : graph3dMixHexColors(baseHex, '#fbeedb', 0.28);
-      let opacity = ambientActive ? Math.min(0.96, 0.86 + ambientBase * 0.08) : 0.94;
-      let emissiveIntensity = ambientActive ? 0.95 + ambientBase * 0.8 + ambientAmp * 0.4 : (dimInactive ? 0.78 : 0.92);
-      let metalness = ambientActive ? 0.05 + ambientBase * 0.06 : (dimInactive ? 0.035 : 0.05);
-      let roughness = ambientActive ? Math.max(0.14, 0.24 - (ambientBase + ambientAmp) * 0.06) : (dimInactive ? 0.22 : 0.18);
+        ? graph3dMixHexColors(baseHex, '#e3f5ff', Math.min(0.45, 0.24 + ambientAmp * 0.3))
+        : graph3dMixHexColors(baseHex, '#cde9ff', 0.16);
+      let opacity = ambientActive ? Math.min(0.96, 0.86 + ambientBase * 0.08) : 0.9;
+      let emissiveIntensity = ambientActive ? 0.95 + ambientBase * 0.8 + ambientAmp * 0.4 : (dimInactive ? 0.58 : 0.92);
+      let metalness = ambientActive ? 0.05 + ambientBase * 0.06 : (dimInactive ? 0.025 : 0.05);
+      let roughness = ambientActive ? Math.max(0.14, 0.24 - (ambientBase + ambientAmp) * 0.06) : (dimInactive ? 0.28 : 0.2);
 
       if (isHighlight) {
         const highlightMix = Math.min(0.42, 0.22 + highlightBase * 0.22);
         fillHex = graph3dMixHexColors(highlightColor, '#ffffff', highlightMix);
-        emissiveHex = graph3dMixHexColors(highlightColor, '#ffd9a6', 0.18);
+        emissiveHex = graph3dMixHexColors(highlightColor, '#a8f0ff', 0.18);
         opacity = Math.min(1, 0.9 + highlightBase * 0.1);
         emissiveIntensity = 1.8 + highlightBase * 1.4 + highlightAmp * 0.8;
         metalness = 0.08 + highlightBase * 0.05;
@@ -4799,10 +4877,10 @@ async function initDocMenuTable() {
         roughness = 0.46;
       } else if (shouldBoost) {
         const boostMix = Math.min(0.22, 0.12 + highlightBase * 0.16);
-        fillHex = graph3dMixHexColors(baseHex, '#ffe3b0', boostMix);
-        emissiveHex = graph3dMixHexColors(baseHex, '#ffdca2', 0.28);
-        opacity = 0.97;
-        emissiveIntensity = dimInactive ? 1.15 : 1.35;
+        fillHex = graph3dMixHexColors(baseHex, highlightColor, boostMix);
+        emissiveHex = graph3dMixHexColors(baseHex, '#a4ecff', 0.24);
+        opacity = 0.96;
+        emissiveIntensity = 1 + highlightBase * 0.4 + highlightAmp * 0.2;
         metalness = 0.05;
         roughness = 0.16;
       } else if (!isMediaAsset) {
@@ -5977,6 +6055,28 @@ async function initDocMenuTable() {
       }
     }
 
+    function updateGraph3dGlowControlsVisibility() {
+      if (!graph3dGlowControlsEl) return;
+      const available = !state.graph3dCollapsed;
+      const open = available && state.graph3dGlowControlsOpen === true;
+      graph3dGlowControlsEl.hidden = !open;
+      graph3dGlowControlsEl.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+
+    function updateGraph3dGlowToggle() {
+      if (!graph3dGlowToggleEl) return;
+      const available = !state.graph3dCollapsed;
+      const open = available && state.graph3dGlowControlsOpen === true;
+      graph3dGlowToggleEl.classList.toggle('is-active', open);
+      graph3dGlowToggleEl.setAttribute('aria-pressed', open ? 'true' : 'false');
+      graph3dGlowToggleEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+      graph3dGlowToggleEl.disabled = available ? false : true;
+      graph3dGlowToggleEl.setAttribute('aria-disabled', available ? 'false' : 'true');
+      graph3dGlowToggleEl.title = available
+        ? (open ? '発光設定を閉じる' : '発光設定を開く')
+        : '3Dビューが閉じているときは使用できません';
+    }
+
     function updateGraph3dDimToggle() {
       if (!graph3dDimToggleEl) return;
       const active = state.graph3dDimInactive !== false;
@@ -5996,6 +6096,8 @@ async function initDocMenuTable() {
       updateGraph3dInfoVisibility();
       updateGraph3dSearchState();
       updateGraph3dDimToggle();
+      updateGraph3dGlowControlsVisibility();
+      updateGraph3dGlowToggle();
       updateViewMode();
       if (state.graph3dCollapsed) {
         graph3dSetStatus('', 'info');
@@ -6485,6 +6587,19 @@ async function initDocMenuTable() {
       updateGraph3dDimToggle();
     } else {
       updateGraph3dDimToggle();
+    }
+    if (graph3dGlowToggleEl) {
+      graph3dGlowToggleEl.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (graph3dGlowToggleEl.disabled) return;
+        state.graph3dGlowControlsOpen = !state.graph3dGlowControlsOpen;
+        updateGraph3dGlowToggle();
+        updateGraph3dGlowControlsVisibility();
+        schedulePersist();
+      });
+      updateGraph3dGlowToggle();
+    } else {
+      updateGraph3dGlowToggle();
     }
     if (graph3dReloadEl) {
       graph3dReloadEl.addEventListener('click', (e) => {
