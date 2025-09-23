@@ -1709,7 +1709,7 @@ async function initDocMenuTable() {
         graph3dCollapsed: true,
         graph3dViewMode: 'media',
         graph3dDimInactive: true,
-        graph3dInfoCollapsed: true,
+        graph3dInfoCollapsed: false,
         graph3dGlow: null,
         graph3dGlowVersion: GRAPH3D_GLOW_CONFIG_VERSION,
         graph3dGlowControlsOpen: false,
@@ -1755,6 +1755,7 @@ async function initDocMenuTable() {
       };
       const GRAPH3D_SEARCH_LIMIT = 50;
       const GRAPH3D_DOUBLE_CLICK_MS = 420;
+      const GRAPH3D_HOVER_PALETTE_FADE_MS = 180;
       const externalScriptPromises = Object.create(null);
       let graph3dInstance = null;
       let graph3dDataCache = null;
@@ -1791,11 +1792,18 @@ async function initDocMenuTable() {
       let graph3dHighlightSpriteTexture = null;
       let graph3dHighlightColorByPath = new Map();
       let graph3dHighlightColorByNode = new Map();
+      let graph3dHoverPaletteEl = null;
+      let graph3dHoverPointer = { x: 0, y: 0 };
+      let graph3dHoverTargetNode = null;
+      let graph3dHoverPaletteHovering = false;
+      let graph3dHoverPaletteHideTimer = null;
+      let graph3dHoverPaletteFadeTimer = null;
       let graph3dIndexedBaseDir = null;
       let graph3dRenderer = null;
       let graph3dSceneLights = [];
       let graph3dLastNodeClick = null;
       let graph3dDimToggleEl = null;
+      let graph3dDimToggleStateEl = null;
       let graph3dGlowToggleEl = null;
       let graph3dGlowControlsEl = null;
       let graph3dHighlightPickerEl = null;
@@ -2057,6 +2065,12 @@ async function initDocMenuTable() {
         return graph3dRgbToHex(mix('r'), mix('g'), mix('b'));
       }
 
+      function graph3dHexToRgba(hex, alpha) {
+        const { r, g, b } = graph3dHexToRgb(hex);
+        const a = Math.max(0, Math.min(1, Number(alpha) || 0));
+        return `rgba(${r}, ${g}, ${b}, ${a})`;
+      }
+
       function clampGraph3dValue(value, min, max) {
         if (!Number.isFinite(value)) return min;
         return Math.max(min, Math.min(max, value));
@@ -2250,6 +2264,170 @@ async function initDocMenuTable() {
         if (persist) schedulePersist();
       }
 
+      function clearGraph3dHoverPaletteHideTimer() {
+        if (graph3dHoverPaletteHideTimer) {
+          clearTimeout(graph3dHoverPaletteHideTimer);
+          graph3dHoverPaletteHideTimer = null;
+        }
+      }
+
+      function cancelGraph3dHoverPaletteHide() {
+        clearGraph3dHoverPaletteHideTimer();
+        cancelGraph3dHoverPaletteFade();
+      }
+
+      function cancelGraph3dHoverPaletteFade() {
+        if (graph3dHoverPaletteFadeTimer) {
+          clearTimeout(graph3dHoverPaletteFadeTimer);
+          graph3dHoverPaletteFadeTimer = null;
+        }
+        if (graph3dHoverPaletteEl && !graph3dHoverPaletteEl.hidden) {
+          graph3dHoverPaletteEl.classList.remove('is-hiding');
+          if (graph3dHoverTargetNode) {
+            graph3dHoverPaletteEl.classList.add('is-visible');
+          }
+        }
+      }
+
+      function scheduleGraph3dHoverPaletteHide({ delay = 160, force = false } = {}) {
+        clearGraph3dHoverPaletteHideTimer();
+        graph3dHoverPaletteHideTimer = setTimeout(() => {
+          graph3dHoverPaletteHideTimer = null;
+          hideGraph3dHoverPalette({ force, clearTarget: true });
+        }, Math.max(0, delay));
+      }
+
+      function ensureGraph3dHoverPalette() {
+        if (graph3dHoverPaletteEl && graph3dHoverPaletteEl.isConnected) {
+          return graph3dHoverPaletteEl;
+        }
+        const container = document.createElement('div');
+        container.className = 'tb-3d-hover-palette';
+        container.hidden = true;
+        const inner = document.createElement('div');
+        inner.className = 'tb-3d-hover-palette-inner';
+        GRAPH3D_HIGHLIGHT_PALETTES.forEach((palette) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'tb-3d-hover-color-btn';
+          button.setAttribute('data-color-key', palette.key);
+          button.style.setProperty('--tb-3d-hover-color', palette.color);
+          button.setAttribute('aria-label', `${palette.label}でハイライト`);
+          inner.appendChild(button);
+        });
+        container.appendChild(inner);
+        container.addEventListener('pointerdown', (event) => {
+          event.stopPropagation();
+        });
+        container.addEventListener('pointerenter', () => {
+          cancelGraph3dHoverPaletteHide();
+          graph3dHoverPaletteHovering = true;
+        });
+        container.addEventListener('pointerleave', () => {
+          graph3dHoverPaletteHovering = false;
+          scheduleGraph3dHoverPaletteHide({ delay: 60 });
+        });
+        container.addEventListener('click', (event) => {
+          const button = event.target.closest('.tb-3d-hover-color-btn');
+          if (!button) return;
+          if (!graph3dHoverTargetNode) return;
+          const colorKey = button.getAttribute('data-color-key');
+          if (!colorKey) return;
+          const result = setGraph3dManualHighlightColor(graph3dHoverTargetNode, colorKey, { persist: true });
+          const forceRefresh = !!(result && result.changed && result.action === 'color');
+          if (result && (result.changed || result.action === 'unchanged')) {
+            applyGraph3dHighlightNodes({ forceRefresh });
+          }
+          setActiveHighlightColor(colorKey, { persist: false });
+          updateGraph3dHoverPaletteSelection(colorKey);
+        });
+        document.body.appendChild(container);
+        graph3dHoverPaletteEl = container;
+        return container;
+      }
+
+      function updateGraph3dHoverPaletteSelection(colorKey) {
+        if (!graph3dHoverPaletteEl) return;
+        const normalized = colorKey ? normalizeHighlightColorKey(colorKey) : null;
+        const buttons = graph3dHoverPaletteEl.querySelectorAll('.tb-3d-hover-color-btn');
+        buttons.forEach((btn) => {
+          const key = normalizeHighlightColorKey(btn.getAttribute('data-color-key'));
+          btn.classList.toggle('is-selected', !!normalized && key === normalized);
+        });
+      }
+
+      function updateGraph3dHoverPalettePosition() {
+        if (!graph3dHoverPaletteEl || graph3dHoverPaletteEl.hidden) return;
+        const OFFSET_X = 16;
+        const OFFSET_Y = 28;
+        let left = graph3dHoverPointer.x + OFFSET_X;
+        let top = graph3dHoverPointer.y - OFFSET_Y;
+        const width = graph3dHoverPaletteEl.offsetWidth || 0;
+        const height = graph3dHoverPaletteEl.offsetHeight || 0;
+        const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 0;
+        const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 0;
+        if (viewportWidth && left + width > viewportWidth - 8) {
+          left = Math.max(8, viewportWidth - width - 8);
+        }
+        if (viewportHeight && top < 8) {
+          const fallbackTop = graph3dHoverPointer.y + 16;
+          top = Math.min(Math.max(8, fallbackTop), viewportHeight - height - 8);
+        }
+        graph3dHoverPaletteEl.style.transform = `translate3d(${Math.round(Math.max(8, left))}px, ${Math.round(Math.max(8, top))}px, 0)`;
+      }
+
+      function showGraph3dHoverPalette(node) {
+        const target = node || null;
+        graph3dHoverTargetNode = target;
+        if (!target) {
+          hideGraph3dHoverPalette({ force: true });
+          return;
+        }
+        const palette = ensureGraph3dHoverPalette();
+        const assignedColor = target.id != null ? graph3dHighlightColorByNode.get(target.id) : null;
+        updateGraph3dHoverPaletteSelection(assignedColor || null);
+        cancelGraph3dHoverPaletteHide();
+        palette.hidden = false;
+        palette.classList.remove('is-hiding');
+        palette.classList.add('is-visible');
+        const updatePosition = () => updateGraph3dHoverPalettePosition();
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(updatePosition);
+        } else {
+          setTimeout(updatePosition, 0);
+        }
+      }
+
+      function hideGraph3dHoverPalette(options = {}) {
+        const { force = false, clearTarget = true } = options || {};
+        if (!graph3dHoverPaletteEl) return;
+        if (!force && graph3dHoverPaletteHovering) return;
+        clearGraph3dHoverPaletteHideTimer();
+        const palette = graph3dHoverPaletteEl;
+        graph3dHoverPaletteHovering = false;
+        if (graph3dHoverPaletteFadeTimer) {
+          clearTimeout(graph3dHoverPaletteFadeTimer);
+          graph3dHoverPaletteFadeTimer = null;
+        }
+        if (force) {
+          palette.hidden = true;
+          palette.classList.remove('is-visible', 'is-hiding');
+          palette.style.transform = 'translate3d(-9999px, -9999px, 0)';
+          if (clearTarget) graph3dHoverTargetNode = null;
+          return;
+        }
+        if (palette.hidden) return;
+        palette.classList.remove('is-visible');
+        palette.classList.add('is-hiding');
+        graph3dHoverPaletteFadeTimer = setTimeout(() => {
+          graph3dHoverPaletteFadeTimer = null;
+          palette.hidden = true;
+          palette.classList.remove('is-hiding');
+          palette.style.transform = 'translate3d(-9999px, -9999px, 0)';
+          if (clearTarget) graph3dHoverTargetNode = null;
+        }, GRAPH3D_HOVER_PALETTE_FADE_MS);
+      }
+
       function toggleGraph3dManualHighlight(node, explicitColorKey = null) {
         if (!node || typeof node !== 'object') {
           return { changed: false, action: 'none', color: null };
@@ -2279,6 +2457,37 @@ async function initDocMenuTable() {
         updateHighlightPaletteUI();
         if (action !== 'none') schedulePersist();
         return { changed: action !== 'none', action, color: targetColor };
+      }
+
+      function setGraph3dManualHighlightColor(node, colorKey, options = {}) {
+        if (!node || typeof node !== 'object') {
+          return { changed: false, action: 'none', color: null };
+        }
+        const { persist = true } = options || {};
+        const pathKey = normalizeHighlightPathFromNode(node);
+        if (!pathKey) {
+          return { changed: false, action: 'none', color: null };
+        }
+        const targetColor = normalizeHighlightColorKey(colorKey || ensureActiveHighlightColor());
+        const currentColor = graph3dHighlightColorByPath.get(pathKey);
+        const currentNormalized = currentColor ? normalizeHighlightColorKey(currentColor) : null;
+        if (currentNormalized === targetColor) {
+          if (node.id != null) {
+            graph3dManualHighlightNodeIds.add(node.id);
+            graph3dHighlightColorByNode.set(node.id, targetColor);
+          }
+          updateHighlightPaletteUI();
+          if (persist) schedulePersist();
+          return { changed: false, action: 'unchanged', color: targetColor };
+        }
+        graph3dHighlightColorByPath.set(pathKey, targetColor);
+        if (node.id != null) {
+          graph3dManualHighlightNodeIds.add(node.id);
+          graph3dHighlightColorByNode.set(node.id, targetColor);
+        }
+        updateHighlightPaletteUI();
+        if (persist) schedulePersist();
+        return { changed: true, action: currentNormalized ? 'color' : 'added', color: targetColor };
       }
 
       ensureActiveHighlightColor();
@@ -4478,7 +4687,13 @@ async function initDocMenuTable() {
                 <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
                 <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
                 <div class="tb-3d-glow-toggle-row">
-                  <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true">実装ハイライト ON</button>
+                  <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true" aria-label="実装ハイライト ON" title="画像・動画以外のノードを暗くして実装中ノードを強調します">
+                    <span class="tb-3d-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 4h2.6l1.7 1.7-2.3 2.3"></path><path d="M11.5 4 6.8 8.7"></path><path d="M6.8 8.7 11 12.9"></path><path d="m9.7 14.2-2.9 2.9"></path><path d="m5.4 10.5-2 2"></path></svg></span>
+                    <span class="tb-3d-dim-state" data-dim-state>ON</span>
+                  </button>
+                  <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み" title="3Dデータを再読み込み">
+                    <span class="tb-3d-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 7.5v-4h-4"></path><path d="M15.5 7.5a6 6 0 1 1-3.5-5.3"></path></svg></span>
+                  </button>
                   <button type="button" id="taskboard3dGlowToggle" class="tb-3d-glow-toggle" aria-expanded="false" aria-pressed="false" aria-controls="taskboard3dGlowControls" aria-label="発光設定" title="発光設定">
                     <span class="tb-3d-glow-toggle-icon" aria-hidden="true">
                       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -4530,43 +4745,6 @@ async function initDocMenuTable() {
                 </div>
               </div>
               <div class="tb-3d-placeholder" id="taskboard3dStatus">3Dビューは未読み込みです。</div>
-            </div>
-            <button type="button" id="taskboard3dInfoToggle" class="tb-3d-info-toggle" aria-expanded="false" aria-controls="taskboard3dInfoPanel" aria-label="info">
-              <span class="tb-3d-info-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.25"></rect><path d="M7.25 3.75v12.5"></path></svg></span>
-              <span class="tb-3d-info-text">info</span>
-            </button>
-            <div class="tb-3d-side" id="taskboard3dInfoPanel">
-              <div class="tb-3d-side-header">
-                <h3 class="tb-3d-title">ノード情報</h3>
-                <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み">再読み込み</button>
-              </div>
-              <div class="tb-3d-mode" role="group" aria-label="表示モード">
-                <button type="button" id="taskboard3dModeMedia" class="tb-3d-mode-btn is-active" data-mode="media">メディア</button>
-                <button type="button" id="taskboard3dModeColor" class="tb-3d-mode-btn" data-mode="color">カラー</button>
-              </div>
-              <div class="tb-3d-highlight-section">
-                <div class="tb-3d-highlight-header">ハイライト色</div>
-                <div class="tb-3d-highlight-picker" id="taskboard3dHighlightPicker" role="radiogroup" aria-label="ハイライト色の選択">
-                  ${GRAPH3D_HIGHLIGHT_PALETTES.map((palette) => (
-                    `<button type="button" class="tb-3d-highlight-btn" data-color-key="${palette.key}" style="--tb-highlight-color: ${palette.color};" aria-pressed="false">
-                      <span class="tb-3d-highlight-dot" aria-hidden="true"></span>
-                      <span class="tb-3d-highlight-label">${palette.label}</span>
-                    </button>`
-                  )).join('')}
-                </div>
-              </div>
-              <div class="tb-3d-base">ベースディレクトリ: <code id="taskboard3dBase">-</code></div>
-              <dl class="tb-3d-meta">
-                <dt>名前</dt><dd id="taskboard3dNodeName">-</dd>
-                <dt>種別</dt><dd id="taskboard3dNodeType">-</dd>
-                <dt>パス</dt><dd id="taskboard3dNodePath">-</dd>
-                <dt>サイズ</dt><dd id="taskboard3dNodeSize">-</dd>
-              </dl>
-              <div class="tb-3d-stats">
-                <h4>統計</h4>
-                <ul id="taskboard3dStats" class="tb-3d-stats-list"></ul>
-              </div>
-              <div class="tb-3d-tip">ノードにカーソルを合わせるかクリックすると詳細が表示されます。</div>
             </div>
           </div>
         </div>
@@ -4644,6 +4822,7 @@ async function initDocMenuTable() {
     graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
     graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
+    graph3dDimToggleStateEl = graph3dDimToggleEl ? graph3dDimToggleEl.querySelector('[data-dim-state]') : null;
     graph3dGlowToggleEl = panel.querySelector('#taskboard3dGlowToggle');
     graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
     graph3dHighlightPickerEl = panel.querySelector('#taskboard3dHighlightPicker');
@@ -4666,6 +4845,20 @@ async function initDocMenuTable() {
         insertPaletteFilesIntoChat(key);
       });
       graph3dPaletteBarEl._tbBound = true;
+    }
+    if (graph3dCanvasEl && !graph3dCanvasEl._tbHoverPointerBound) {
+      graph3dCanvasEl.addEventListener('pointermove', (event) => {
+        graph3dHoverPointer.x = event.clientX;
+        graph3dHoverPointer.y = event.clientY;
+        updateGraph3dHoverPalettePosition();
+      });
+      graph3dCanvasEl.addEventListener('pointerenter', () => {
+        cancelGraph3dHoverPaletteHide();
+      });
+      graph3dCanvasEl.addEventListener('pointerleave', () => {
+        scheduleGraph3dHoverPaletteHide({ delay: 120 });
+      });
+      graph3dCanvasEl._tbHoverPointerBound = true;
     }
     updateHighlightPaletteUI();
     initializeGraph3dSearchUI();
@@ -6036,6 +6229,7 @@ async function initDocMenuTable() {
       container.innerHTML = '';
       if (graph3dStatusEl) graph3dStatusEl.classList.add('is-hidden');
       resetGraph3dInfo();
+      hideGraph3dHoverPalette({ force: true });
       const forceGraphFn = typeof ForceGraphFactory === 'function' ? ForceGraphFactory : window.ForceGraph3D;
       if (typeof forceGraphFn !== 'function') return;
       const graphInitializer = forceGraphFn();
@@ -6098,7 +6292,17 @@ async function initDocMenuTable() {
 
       Graph.onNodeHover(node => {
         if (!graph3dPinnedNode) applyGraph3dInfo(node || null);
-        graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+        const highlightEnabled = state.graph3dDimInactive !== false;
+        if (node && highlightEnabled) {
+          cancelGraph3dHoverPaletteHide();
+          showGraph3dHoverPalette(node);
+        } else {
+          const force = !highlightEnabled;
+          scheduleGraph3dHoverPaletteHide({ delay: force ? 0 : 160, force });
+        }
+        if (graph3dCanvasEl) {
+          graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+        }
         if (node && node.type === 'video') {
           startGraph3dVideoForNode(node);
         } else {
@@ -6128,6 +6332,10 @@ async function initDocMenuTable() {
           if (toggleResult && toggleResult.changed) {
             applyGraph3dHighlightNodes({ forceRefresh: toggleResult.action === 'color' });
           }
+          if (graph3dHoverTargetNode && graph3dHoverTargetNode.id === node.id) {
+            const currentColor = graph3dHighlightColorByNode.get(node.id) || null;
+            updateGraph3dHoverPaletteSelection(currentColor);
+          }
         }
         syncGraph3dSearchHighlightByNode(node);
         graph3dAutoFitLocked = true;
@@ -6154,6 +6362,7 @@ async function initDocMenuTable() {
           hideGraph3dContextMenu();
           stopGraph3dActiveVideo();
           syncGraph3dSearchHighlightByNode(null);
+          hideGraph3dHoverPalette({ force: true });
         });
       }
 
@@ -6362,11 +6571,15 @@ async function initDocMenuTable() {
     }
 
     function updateGraph3dInfoVisibility() {
-      if (!graph3dInfoToggleEl) return;
-      const collapsed = !!state.graph3dInfoCollapsed;
+      const hasToggle = !!graph3dInfoToggleEl;
+      const collapsed = hasToggle ? !!state.graph3dInfoCollapsed : false;
+      if (!hasToggle && state.graph3dInfoCollapsed) {
+        state.graph3dInfoCollapsed = false;
+      }
       if (graph3dSideEl) {
         graph3dSideEl.classList.toggle('is-collapsed', collapsed);
       }
+      if (!hasToggle) return;
       const label = collapsed ? 'info' : 'ノード情報を隠す';
       graph3dInfoToggleEl.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       graph3dInfoToggleEl.setAttribute('aria-label', label);
@@ -6442,10 +6655,15 @@ async function initDocMenuTable() {
       graph3dDimToggleEl.setAttribute('aria-pressed', active ? 'true' : 'false');
       graph3dDimToggleEl.disabled = !!state.graph3dCollapsed;
       graph3dDimToggleEl.setAttribute('aria-disabled', state.graph3dCollapsed ? 'true' : 'false');
-      graph3dDimToggleEl.textContent = `実装ハイライト ${active ? 'ON' : 'OFF'}`;
-      graph3dDimToggleEl.title = active
+      if (graph3dDimToggleStateEl) {
+        graph3dDimToggleStateEl.textContent = active ? 'ON' : 'OFF';
+        graph3dDimToggleStateEl.setAttribute('data-state', active ? 'on' : 'off');
+      }
+      const tooltip = active
         ? '画像・動画以外のノードを暗くして実装中ノードを強調します'
         : '画像・動画以外のノードも通常の明るさで表示します';
+      graph3dDimToggleEl.title = tooltip;
+      graph3dDimToggleEl.setAttribute('aria-label', `実装ハイライト ${active ? 'ON' : 'OFF'}`);
     }
 
     function renderGraph3dPanel() {
@@ -6489,6 +6707,7 @@ async function initDocMenuTable() {
         updateGraph3dBloomIntensity();
         graph3dRenderer = null;
         graph3dBloomPass = null;
+        hideGraph3dHoverPalette({ force: true });
       }
     }
 
@@ -6961,6 +7180,9 @@ async function initDocMenuTable() {
         e.preventDefault();
         const current = state.graph3dDimInactive !== false;
         state.graph3dDimInactive = !current;
+        if (state.graph3dDimInactive === false) {
+          hideGraph3dHoverPalette({ force: true });
+        }
         updateGraph3dDimToggle();
         refreshGraph3dNodeObjects({ force: true });
         applyGraph3dHighlightNodes();
