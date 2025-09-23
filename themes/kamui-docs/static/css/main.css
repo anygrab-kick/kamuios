@@ -1704,7 +1704,6 @@ pre.code code { color: var(--text); }
   flex-wrap: wrap;
 }
 
-.tb-3d-pencil-toggle,
 .tb-3d-lasso-toggle {
   padding: 6px;
   border-radius: 6px;
@@ -1718,14 +1717,12 @@ pre.code code { color: var(--text); }
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
-.tb-3d-pencil-toggle:hover,
 .tb-3d-lasso-toggle:hover {
   background: rgba(38, 45, 74, 0.85);
   border-color: rgba(129, 140, 248, 0.65);
   color: rgba(232, 235, 255, 0.98);
 }
 
-.tb-3d-pencil-toggle.is-active,
 .tb-3d-lasso-toggle.is-active {
   background: rgba(101, 116, 205, 0.3);
   border-color: rgba(165, 180, 252, 0.9);
@@ -1733,8 +1730,6 @@ pre.code code { color: var(--text); }
   box-shadow: 0 0 10px rgba(129, 140, 248, 0.5);
 }
 
-.tb-3d-pencil-toggle:disabled,
-.tb-3d-pencil-toggle[aria-disabled="true"],
 .tb-3d-lasso-toggle:disabled,
 .tb-3d-lasso-toggle[aria-disabled="true"] {
   opacity: 0.45;
@@ -1742,7 +1737,16 @@ pre.code code { color: var(--text); }
   box-shadow: none;
 }
 
-.tb-3d-pencil-canvas,
+.tb-3d-lasso-toggle.is-erase-mode {
+  background: rgba(205, 66, 65, 0.3);
+  border-color: rgba(255, 68, 68, 0.7);
+}
+
+.tb-3d-lasso-toggle.is-erase-mode:hover {
+  background: rgba(205, 66, 65, 0.4);
+  border-color: rgba(255, 68, 68, 0.85);
+}
+
 .tb-3d-lasso-canvas {
   position: absolute;
   inset: 0;
@@ -1753,7 +1757,6 @@ pre.code code { color: var(--text); }
   touch-action: none;
 }
 
-.tb-3d-pencil-svg,
 .tb-3d-lasso-svg {
   position: absolute;
   inset: 0;
@@ -1765,7 +1768,6 @@ pre.code code { color: var(--text); }
   overflow: visible;
 }
 
-.tb-3d-pencil-svg path,
 .tb-3d-lasso-svg path {
   transition: opacity 0.1s ease;
   filter: drop-shadow(0 0 8px rgba(129, 140, 248, 0.5));
@@ -1783,21 +1785,18 @@ pre.code code { color: var(--text); }
   cursor: crosshair !important;
 }
 
-[data-theme="light"] .tb-3d-pencil-toggle,
 [data-theme="light"] .tb-3d-lasso-toggle {
   background: rgba(232, 240, 255, 0.82);
   border-color: rgba(99, 102, 241, 0.45);
   color: rgba(45, 55, 72, 0.92);
 }
 
-[data-theme="light"] .tb-3d-pencil-toggle:hover,
 [data-theme="light"] .tb-3d-lasso-toggle:hover {
   background: rgba(220, 230, 255, 0.92);
   border-color: rgba(99, 102, 241, 0.6);
   color: rgba(30, 41, 59, 0.96);
 }
 
-[data-theme="light"] .tb-3d-pencil-toggle.is-active,
 [data-theme="light"] .tb-3d-lasso-toggle.is-active {
   background: rgba(180, 198, 255, 0.88);
   border-color: rgba(99, 102, 241, 0.8);
@@ -1805,37 +1804,8 @@ pre.code code { color: var(--text); }
   box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
-[data-theme="light"] .tb-3d-pencil-svg path,
 [data-theme="light"] .tb-3d-lasso-svg path {
   filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.4));
-}
-
-/* 鉛筆オーバーレイ */
-.pencil-overlay-container {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 10000;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.pencil-overlay-container svg {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.pencil-overlay-container path {
-  transition: opacity 0.1s ease;
-}
-
-[data-theme="light"] .pencil-overlay-container path {
-  filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.6));
 }
 
 /* 投げ縄オーバーレイ */
@@ -1864,6 +1834,30 @@ pre.code code { color: var(--text); }
 
 [data-theme="light"] .lasso-overlay-container path {
   filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.6));
+}
+
+/* 投げ縄カラーピッカー */
+.tb-3d-lasso-color-picker {
+  display: inline-flex;
+  gap: 6px;
+  backdrop-filter: blur(10px);
+}
+
+.tb-3d-lasso-color-btn,
+.tb-3d-lasso-erase-btn {
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+[data-theme="light"] .tb-3d-lasso-color-picker {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+[data-theme="light"] .tb-3d-lasso-color-btn {
+  border-color: rgba(148, 163, 184, 0.45);
+  box-shadow: 0 0 10px rgba(148, 163, 184, 0.4);
 }
 
 .tb-3d-hover-palette {
@@ -2129,7 +2123,6 @@ pre.code code { color: var(--text); }
 }
 
 .tb-3d-icon,
-.tb-3d-pencil-icon,
 .tb-3d-lasso-icon {
   display: inline-flex;
   align-items: center;
@@ -2139,7 +2132,6 @@ pre.code code { color: var(--text); }
 }
 
 .tb-3d-icon svg,
-.tb-3d-pencil-icon svg,
 .tb-3d-lasso-icon svg,
 .tb-3d-dim-toggle svg {
   width: 100%;

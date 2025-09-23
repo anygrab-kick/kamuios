@@ -1807,12 +1807,14 @@ async function initDocMenuTable() {
       let graph3dGlowControlsEl = null;
       let graph3dHighlightPickerEl = null;
       let graph3dPaletteBarEl = null;
-      let graph3dPencilToggleEl = null;
-      let graph3dPencilOverlay = null;
-      let graph3dPencilActive = false;
+      // 鉛筆機能は削除
+      // let graph3dPencilToggleEl = null;
+      // let graph3dPencilOverlay = null;
+      // let graph3dPencilActive = false;
       let graph3dLassoToggleEl = null;
       let graph3dLassoOverlay = null;
       let graph3dLassoActive = false;
+      let graph3dLassoEraseMode = false;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
@@ -2303,11 +2305,11 @@ async function initDocMenuTable() {
         state.graph3dActiveHighlightColor = normalized;
         updateHighlightPickerUI();
         
-        // 鉛筆オーバーレイの色も更新
-        if (graph3dPencilOverlay && graph3dPencilActive) {
-          const hexColor = getGraph3dHighlightColorHex(normalized) || '#818CF8';
-          graph3dPencilOverlay.setStrokeColor(hexColor);
-        }
+        // 鉛筆機能は削除
+        // if (graph3dPencilOverlay && graph3dPencilActive) {
+        //   const hexColor = getGraph3dHighlightColorHex(normalized) || '#818CF8';
+        //   graph3dPencilOverlay.setStrokeColor(hexColor);
+        // }
         
         // 投げ縄オーバーレイの色も更新
         if (graph3dLassoOverlay && graph3dLassoActive) {
@@ -2505,6 +2507,8 @@ async function initDocMenuTable() {
         }
       }
 
+      // 鉛筆機能は削除
+      /*
       function updateGraph3dPencilToggle() {
         if (!graph3dPencilToggleEl) return;
         const available = !state.graph3dCollapsed;
@@ -2523,16 +2527,20 @@ async function initDocMenuTable() {
         }
         // updateGraph3dPencilCanvasState();
       }
+      */
 
       function updateGraph3dLassoToggle() {
         if (!graph3dLassoToggleEl) return;
         const available = !state.graph3dCollapsed;
         graph3dLassoToggleEl.classList.toggle('is-active', available && graph3dLassoActive);
+        graph3dLassoToggleEl.classList.toggle('is-erase-mode', available && graph3dLassoActive && graph3dLassoEraseMode);
         graph3dLassoToggleEl.setAttribute('aria-pressed', available && graph3dLassoActive ? 'true' : 'false');
         graph3dLassoToggleEl.disabled = available ? false : true;
         graph3dLassoToggleEl.setAttribute('aria-disabled', available ? 'false' : 'true');
         graph3dLassoToggleEl.title = available
-          ? (graph3dLassoActive ? '投げ縄ハイライトを終了' : '投げ縄で囲んだノードをハイライト')
+          ? (graph3dLassoActive 
+            ? (graph3dLassoEraseMode ? '消しゴムモードを終了' : '投げ縄ハイライトを終了')
+            : '投げ縄で囲んだノードをハイライト')
           : '3Dビューが閉じているときは使用できません';
         if (graph3dCanvasEl) {
           graph3dCanvasEl.classList.toggle('is-lasso-active', available && graph3dLassoActive);
@@ -2810,6 +2818,8 @@ async function initDocMenuTable() {
       }
       */
 
+      // 鉛筆機能は削除
+      /*
       function setGraph3dPencilActive(next) {
         const available = !state.graph3dCollapsed;
         const target = available && !!next;
@@ -2844,6 +2854,7 @@ async function initDocMenuTable() {
         setGraph3dControlsEnabled(!graph3dPencilActive);
         updateGraph3dPencilToggle();
       }
+      */
 
       function setGraph3dLassoActive(next) {
         const available = !state.graph3dCollapsed;
@@ -2854,10 +2865,10 @@ async function initDocMenuTable() {
         }
         graph3dLassoActive = target;
         
-        // 鉛筆がアクティブなら無効化
-        if (graph3dLassoActive && graph3dPencilActive) {
-          setGraph3dPencilActive(false);
-        }
+        // 鉛筆機能は削除
+        // if (graph3dLassoActive && graph3dPencilActive) {
+        //   setGraph3dPencilActive(false);
+        // }
         
         if (graph3dCanvasEl) {
           graph3dCanvasEl.classList.toggle('is-lasso-active', graph3dLassoActive);
@@ -2870,7 +2881,9 @@ async function initDocMenuTable() {
           
           // 色を更新
           if (graph3dLassoActive) {
-            const color = getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8';
+            const color = graph3dLassoEraseMode 
+              ? '#ff4444' 
+              : (getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8');
             graph3dLassoOverlay.setStrokeColor(color);
           }
         }
@@ -2880,6 +2893,8 @@ async function initDocMenuTable() {
         updateGraph3dLassoToggle();
       }
 
+      // 鉛筆機能は削除
+      /*
       function applyGraph3dPencilSelection(points) {
         if (!graph3dInstance || !graph3dCanvasEl || !Array.isArray(points) || points.length < 1) return;
         if (!window.THREE) return;
@@ -2966,6 +2981,7 @@ async function initDocMenuTable() {
           if (changed) schedulePersist();
         }
       }
+      */
 
       function applyGraph3dLassoSelection(points) {
         if (!graph3dInstance || !graph3dCanvasEl || !Array.isArray(points) || points.length < 3) return;
@@ -2997,18 +3013,36 @@ async function initDocMenuTable() {
           // ポリゴン内かどうかチェック
           if (!isPointInPolygon({ x: screenX, y: screenY }, points)) return;
           
-          const result = setGraph3dManualHighlightColor(node, colorKey, { persist: false });
-          if (!result || result.action === 'none') return;
-          selectedCount += 1;
-          if (result.changed) changed = true;
+          if (graph3dLassoEraseMode) {
+            // 消しゴムモード：ハイライトを削除
+            const pathKey = normalizeHighlightPathFromNode(node);
+            if (pathKey && graph3dHighlightColorByPath.has(pathKey)) {
+              graph3dHighlightColorByPath.delete(pathKey);
+              selectedCount += 1;
+              changed = true;
+            }
+          } else {
+            // 通常モード：ハイライトを設定
+            const result = setGraph3dManualHighlightColor(node, colorKey, { persist: false });
+            if (!result || result.action === 'none') return;
+            selectedCount += 1;
+            if (result.changed) changed = true;
+          }
         });
         
         if (selectedCount > 0) {
           updateHighlightPaletteUI();
           applyGraph3dHighlightNodes({ forceRefresh: true });
-          updateGraph3dHoverPaletteSelection(colorKey);
+          if (!graph3dLassoEraseMode) {
+            updateGraph3dHoverPaletteSelection(colorKey);
+          }
           if (changed) schedulePersist();
         }
+        
+        // 投げ縄選択完了後、投げ縄モードを無効化
+        setGraph3dLassoActive(false);
+        // 消しゴムモードもリセット
+        graph3dLassoEraseMode = false;
       }
 
       function toggleGraph3dManualHighlight(node, explicitColorKey = null) {
@@ -5276,9 +5310,6 @@ async function initDocMenuTable() {
                   <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み" title="3Dデータを再読み込み">
                     <span class="tb-3d-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 7.5v-4h-4"></path><path d="M15.5 7.5a6 6 0 1 1-3.5-5.3"></path></svg></span>
                   </button>
-                  <button type="button" id="taskboard3dPencilToggle" class="tb-3d-pencil-toggle" aria-pressed="false" aria-label="鉛筆ハイライト" title="鉛筆で描いた線に近いノードをハイライト">
-                    <span class="tb-3d-pencil-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 2.5l5 5L6 19H1v-5L12.5 2.5z"></path><path d="M9 6l5 5"></path></svg></span>
-                  </button>
                   <button type="button" id="taskboard3dLassoToggle" class="tb-3d-lasso-toggle" aria-pressed="false" aria-label="投げ縄ハイライト" title="投げ縄で囲んだノードをハイライト">
                     <span class="tb-3d-lasso-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.8c0-1.8 1.5-3.3 3.3-3.3h4.4c1.5 0 2.8 1.2 2.8 2.8 0 1.5-1.2 2.8-2.8 2.8H9.1c-2.1 0-3.8 1.7-3.8 3.8 0 1.7 1.4 3.1 3.1 3.1h1.2c1 0 1.9.8 1.9 1.9 0 1-.8 1.9-1.9 1.9H7"/></svg></span>
                   </button>
@@ -5411,7 +5442,7 @@ async function initDocMenuTable() {
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
     graph3dGlowToggleEl = panel.querySelector('#taskboard3dGlowToggle');
     graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
-    graph3dPencilToggleEl = panel.querySelector('#taskboard3dPencilToggle');
+    // graph3dPencilToggleEl = panel.querySelector('#taskboard3dPencilToggle'); // 鉛筆機能は削除
     graph3dLassoToggleEl = panel.querySelector('#taskboard3dLassoToggle');
     graph3dHighlightPickerEl = panel.querySelector('#taskboard3dHighlightPicker');
     graph3dPaletteBarEl = panel.querySelector('#taskboardPaletteBar');
@@ -5434,10 +5465,93 @@ async function initDocMenuTable() {
       });
       graph3dPaletteBarEl._tbBound = true;
     }
+    // 鉛筆機能は削除
+    /*
     if (graph3dPencilToggleEl && !graph3dPencilToggleEl._tbBound) {
-      graph3dPencilToggleEl.addEventListener('click', () => {
-        setGraph3dPencilActive(!graph3dPencilActive);
+      // カラーパレットポップアップを作成（鉛筆用）
+      const pencilColorPicker = document.createElement('div');
+      pencilColorPicker.className = 'tb-3d-pencil-color-picker';
+      pencilColorPicker.style.cssText = `
+        position: absolute;
+        display: none;
+        background: rgba(28, 33, 55, 0.95);
+        border: 1px solid rgba(129, 140, 248, 0.45);
+        border-radius: 8px;
+        padding: 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        z-index: 10001;
+      `;
+      
+      // カラーボタンを追加（既存の5色パレットを使用）
+      const colors = GRAPH3D_HIGHLIGHT_PALETTES;
+      
+      colors.forEach(({ key, label }) => {
+        const button = document.createElement('button');
+        button.className = 'tb-3d-pencil-color-btn';
+        button.setAttribute('data-color-key', key);
+        button.setAttribute('aria-label', label);
+        const color = getGraph3dHighlightColorHex(key);
+        button.style.cssText = `
+          width: 28px;
+          height: 28px;
+          border-radius: 4px;
+          border: 2px solid transparent;
+          background-color: ${color};
+          margin: 2px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        `;
+        button.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setActiveHighlightColor(key);
+          setGraph3dPencilActive(true);
+          pencilColorPicker.style.display = 'none';
+          
+          // 色を即座に更新
+          if (graph3dPencilOverlay) {
+            const updatedColor = getGraph3dHighlightColorHex(key);
+            graph3dPencilOverlay.setStrokeColor(updatedColor);
+          }
+        });
+        button.addEventListener('mouseenter', () => {
+          button.style.transform = 'scale(1.1)';
+          button.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+        });
+        button.addEventListener('mouseleave', () => {
+          button.style.transform = 'scale(1)';
+          button.style.borderColor = 'transparent';
+        });
+        pencilColorPicker.appendChild(button);
       });
+      
+      // ボタンの親要素に追加
+      graph3dPencilToggleEl.parentElement.style.position = 'relative';
+      graph3dPencilToggleEl.parentElement.appendChild(pencilColorPicker);
+      
+      graph3dPencilToggleEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        if (graph3dPencilActive) {
+          // 既にアクティブな場合は無効化
+          setGraph3dPencilActive(false);
+          pencilColorPicker.style.display = 'none';
+        } else {
+          // カラーピッカーを表示
+          const rect = graph3dPencilToggleEl.getBoundingClientRect();
+          const parentRect = graph3dPencilToggleEl.parentElement.getBoundingClientRect();
+          pencilColorPicker.style.left = `${rect.left - parentRect.left}px`;
+          pencilColorPicker.style.top = `${rect.bottom - parentRect.top + 4}px`;
+          pencilColorPicker.style.display = 'flex';
+        }
+      });
+      
+      // クリック外で非表示
+      document.addEventListener('click', (e) => {
+        if (!graph3dPencilToggleEl.contains(e.target) && !pencilColorPicker.contains(e.target)) {
+          pencilColorPicker.style.display = 'none';
+        }
+      });
+      
       graph3dPencilToggleEl._tbBound = true;
       
       // 鉛筆オーバーレイを初期化
@@ -5458,10 +5572,184 @@ async function initDocMenuTable() {
         });
       }
     }
+    */
     if (graph3dLassoToggleEl && !graph3dLassoToggleEl._tbBound) {
-      graph3dLassoToggleEl.addEventListener('click', () => {
-        setGraph3dLassoActive(!graph3dLassoActive);
+      // カラーパレットポップアップを作成
+      const lassoColorPicker = document.createElement('div');
+      lassoColorPicker.className = 'tb-3d-lasso-color-picker';
+      lassoColorPicker.style.cssText = `
+        position: absolute;
+        display: none;
+        background: rgba(28, 33, 55, 0.95);
+        border: 1px solid rgba(129, 140, 248, 0.45);
+        border-radius: 8px;
+        padding: 6px 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        z-index: 10001;
+        gap: 6px;
+      `;
+      
+      // カラーボタンを追加（既存の5色パレットを使用）
+      const colors = GRAPH3D_HIGHLIGHT_PALETTES;
+      
+      // カラーボタンを更新する関数
+      const updateColorButtons = () => {
+        const currentColor = state.graph3dActiveHighlightColor;
+        const isDarkTheme = document.documentElement.getAttribute('data-theme') !== 'light';
+        lassoColorPicker.querySelectorAll('.tb-3d-lasso-color-btn').forEach(btn => {
+          const btnKey = btn.getAttribute('data-color-key');
+          const isSelected = btnKey === currentColor && !graph3dLassoEraseMode;
+          btn.style.borderColor = isSelected 
+            ? (isDarkTheme ? 'rgba(250, 250, 250, 0.95)' : 'rgba(99, 102, 241, 0.8)')
+            : (isDarkTheme ? 'rgba(255, 255, 255, 0.65)' : 'rgba(148, 163, 184, 0.45)');
+          btn.style.boxShadow = isSelected
+            ? `0 0 20px ${isDarkTheme ? 'rgba(255, 255, 255, 0.55)' : 'rgba(99, 102, 241, 0.6)'}`
+            : `0 0 12px ${isDarkTheme ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.4)'}`;
+        });
+        // 消しゴムボタンも更新
+        const eraseBtn = lassoColorPicker.querySelector('.tb-3d-lasso-erase-btn');
+        if (eraseBtn) {
+          eraseBtn.style.borderColor = graph3dLassoEraseMode
+            ? (isDarkTheme ? 'rgba(250, 250, 250, 0.95)' : 'rgba(99, 102, 241, 0.8)')
+            : (isDarkTheme ? 'rgba(255, 255, 255, 0.65)' : 'rgba(148, 163, 184, 0.45)');
+          eraseBtn.style.boxShadow = graph3dLassoEraseMode
+            ? `0 0 20px ${isDarkTheme ? 'rgba(255, 255, 255, 0.55)' : 'rgba(99, 102, 241, 0.6)'}`
+            : `0 0 12px ${isDarkTheme ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.4)'}`;
+        }
+      };
+      
+      colors.forEach(({ key, label }) => {
+        const button = document.createElement('button');
+        button.className = 'tb-3d-lasso-color-btn';
+        button.setAttribute('data-color-key', key);
+        button.setAttribute('aria-label', label);
+        const color = getGraph3dHighlightColorHex(key);
+        const isDarkTheme = document.documentElement.getAttribute('data-theme') !== 'light';
+        button.style.cssText = `
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          border: 2px solid ${isDarkTheme ? 'rgba(255, 255, 255, 0.65)' : 'rgba(148, 163, 184, 0.45)'};
+          background-color: ${color};
+          margin: 0;
+          cursor: pointer;
+          transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+          box-shadow: 0 0 12px ${isDarkTheme ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.4)'};
+        `;
+        button.addEventListener('click', (e) => {
+          e.stopPropagation();
+          graph3dLassoEraseMode = false;
+          setActiveHighlightColor(key);
+          setGraph3dLassoActive(true);
+          lassoColorPicker.style.display = 'none';
+          updateColorButtons();
+          updateGraph3dLassoToggle();
+          
+          // 色を即座に更新
+          if (graph3dLassoOverlay) {
+            const updatedColor = getGraph3dHighlightColorHex(key);
+            graph3dLassoOverlay.setStrokeColor(updatedColor);
+          }
+        });
+        button.addEventListener('mouseenter', () => {
+          const isDarkTheme = document.documentElement.getAttribute('data-theme') !== 'light';
+          button.style.transform = 'translateY(-1px) scale(1.08)';
+          button.style.boxShadow = `0 0 16px ${isDarkTheme ? 'rgba(59, 130, 246, 0.55)' : 'rgba(148, 163, 184, 0.5)'}`;
+        });
+        button.addEventListener('mouseleave', () => {
+          updateColorButtons();
+          button.style.transform = 'scale(1)';
+        });
+        lassoColorPicker.appendChild(button);
       });
+      
+      // 消しゴムボタンを追加
+      const eraseButton = document.createElement('button');
+      eraseButton.className = 'tb-3d-lasso-erase-btn';
+      eraseButton.setAttribute('aria-label', 'ハイライトを削除');
+      const isDarkTheme = document.documentElement.getAttribute('data-theme') !== 'light';
+      eraseButton.style.cssText = `
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 2px solid ${isDarkTheme ? 'rgba(255, 255, 255, 0.65)' : 'rgba(148, 163, 184, 0.45)'};
+        background-color: ${isDarkTheme ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)'};
+        margin: 0 0 0 6px;
+        cursor: pointer;
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        box-shadow: 0 0 12px ${isDarkTheme ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.4)'};
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      `;
+      
+      // 消しゴムアイコンを追加
+      eraseButton.innerHTML = `
+        <svg width="10" height="10" viewBox="0 0 20 20" fill="none" stroke="${isDarkTheme ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.6)'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5.5 5.5l9 9m0-9l-9 9"/>
+        </svg>
+      `;
+      
+        eraseButton.addEventListener('click', (e) => {
+          e.stopPropagation();
+          graph3dLassoEraseMode = true;
+          setGraph3dLassoActive(true);
+          lassoColorPicker.style.display = 'none';
+          updateColorButtons();
+          updateGraph3dLassoToggle();
+          
+          // 消しゴムモードの場合は赤系の色で表示
+          if (graph3dLassoOverlay) {
+            graph3dLassoOverlay.setStrokeColor('#ff4444');
+          }
+        });
+      
+      eraseButton.addEventListener('mouseenter', () => {
+        const isDarkTheme = document.documentElement.getAttribute('data-theme') !== 'light';
+        eraseButton.style.transform = 'translateY(-1px) scale(1.08)';
+        eraseButton.style.boxShadow = `0 0 16px ${isDarkTheme ? 'rgba(59, 130, 246, 0.55)' : 'rgba(148, 163, 184, 0.5)'}`;
+      });
+      
+      eraseButton.addEventListener('mouseleave', () => {
+        updateColorButtons();
+        eraseButton.style.transform = 'scale(1)';
+      });
+      
+      lassoColorPicker.appendChild(eraseButton);
+      
+      // 初期状態を更新
+      updateColorButtons();
+      
+      // ボタンの親要素に追加
+      graph3dLassoToggleEl.parentElement.style.position = 'relative';
+      graph3dLassoToggleEl.parentElement.appendChild(lassoColorPicker);
+      
+      graph3dLassoToggleEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        if (graph3dLassoActive) {
+          // 既にアクティブな場合は無効化
+          setGraph3dLassoActive(false);
+          lassoColorPicker.style.display = 'none';
+        } else {
+          // カラーピッカーを表示
+          const rect = graph3dLassoToggleEl.getBoundingClientRect();
+          const parentRect = graph3dLassoToggleEl.parentElement.getBoundingClientRect();
+          lassoColorPicker.style.left = `${rect.left - parentRect.left}px`;
+          lassoColorPicker.style.top = `${rect.bottom - parentRect.top + 4}px`;
+          lassoColorPicker.style.display = 'flex';
+          // 現在の選択状態を更新
+          updateColorButtons();
+        }
+      });
+      
+      // クリック外で非表示
+      document.addEventListener('click', (e) => {
+        if (!graph3dLassoToggleEl.contains(e.target) && !lassoColorPicker.contains(e.target)) {
+          lassoColorPicker.style.display = 'none';
+        }
+      });
+      
       graph3dLassoToggleEl._tbBound = true;
       
       // 投げ縄オーバーレイを初期化
@@ -5870,10 +6158,17 @@ async function initDocMenuTable() {
         if (originalAnimationCycle) {
           originalAnimationCycle.call(this);
         }
+        
+        // コントロールの更新を確実に実行
+        const controls = graphInstance.controls && graphInstance.controls();
+        if (controls && controls.enabled !== false && controls.update) {
+          controls.update();
+        }
+        
         // カスタムレンダリングを実行
         customRender();
-        // デフォルトのレンダリングを防ぐために、renderメソッドを空にする
-        return false;
+        // アニメーションループを継続
+        return true;
       };
       
       // 元のrenderメソッドをオーバーライド
@@ -6943,8 +7238,9 @@ async function initDocMenuTable() {
           scheduleGraph3dHoverPaletteHide({ delay: force ? 0 : 160, force });
         }
         if (graph3dCanvasEl) {
-          if (graph3dPencilActive) {
-            graph3dCanvasEl.style.cursor = '';
+          // 鉛筆機能は削除、投げ縄アクティブ時はカーソルを変更しない
+          if (graph3dLassoActive) {
+            graph3dCanvasEl.style.cursor = 'crosshair';
           } else {
             graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
           }
@@ -7144,7 +7440,8 @@ async function initDocMenuTable() {
             graph3dSetStatus('3Dビューの初期化に失敗しました。', 'error');
           }
         }, 1200);
-        setGraph3dControlsEnabled(!graph3dPencilActive);
+        // 削除された鉛筆機能の参照を修正
+        setGraph3dControlsEnabled(!graph3dLassoActive);
         // updateGraph3dPencilCanvasState();
       } catch (_) {}
 
@@ -7320,7 +7617,7 @@ async function initDocMenuTable() {
       updateGraph3dInfoVisibility();
       updateGraph3dSearchState();
       updateGraph3dDimToggle();
-      updateGraph3dPencilToggle();
+      // updateGraph3dPencilToggle(); // 鉛筆機能は削除
       updateGraph3dLassoToggle();
       setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
       updateViewMode();
