@@ -1803,11 +1803,16 @@ async function initDocMenuTable() {
       let graph3dSceneLights = [];
       let graph3dLastNodeClick = null;
       let graph3dDimToggleEl = null;
-      let graph3dDimToggleStateEl = null;
       let graph3dGlowToggleEl = null;
       let graph3dGlowControlsEl = null;
       let graph3dHighlightPickerEl = null;
       let graph3dPaletteBarEl = null;
+      let graph3dPencilToggleEl = null;
+      let graph3dPencilOverlay = null;
+      let graph3dPencilActive = false;
+      let graph3dLassoToggleEl = null;
+      let graph3dLassoOverlay = null;
+      let graph3dLassoActive = false;
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
@@ -2160,6 +2165,42 @@ async function initDocMenuTable() {
         return palette?.label || '';
       }
 
+      function hexToRgba(hex, alpha = 1) {
+        if (typeof hex !== 'string') {
+          return `rgba(0, 213, 255, ${Math.max(0, Math.min(1, alpha))})`;
+        }
+        const normalized = hex.replace(/[^0-9a-fA-F]/g, '');
+        const clampAlpha = Math.max(0, Math.min(1, Number(alpha) || 0));
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        if (normalized.length === 3) {
+          r = parseInt(normalized[0] + normalized[0], 16);
+          g = parseInt(normalized[1] + normalized[1], 16);
+          b = parseInt(normalized[2] + normalized[2], 16);
+        } else if (normalized.length >= 6) {
+          r = parseInt(normalized.slice(0, 2), 16);
+          g = parseInt(normalized.slice(2, 4), 16);
+          b = parseInt(normalized.slice(4, 6), 16);
+        }
+        return `rgba(${r}, ${g}, ${b}, ${clampAlpha})`;
+      }
+
+      function isPointInPolygon(point, polygon) {
+        if (!point || !polygon || polygon.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+          const xi = polygon[i].x;
+          const yi = polygon[i].y;
+          const xj = polygon[j].x;
+          const yj = polygon[j].y;
+          const intersect = ((yi > point.y) !== (yj > point.y))
+            && (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || 1e-9) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      }
+
       function normalizeHighlightPathFromNode(node) {
         if (!node || typeof node !== 'object') return null;
         const rawPath = getGraph3dNodeDisplayPath(node);
@@ -2261,6 +2302,19 @@ async function initDocMenuTable() {
         }
         state.graph3dActiveHighlightColor = normalized;
         updateHighlightPickerUI();
+        
+        // 鉛筆オーバーレイの色も更新
+        if (graph3dPencilOverlay && graph3dPencilActive) {
+          const hexColor = getGraph3dHighlightColorHex(normalized) || '#818CF8';
+          graph3dPencilOverlay.setStrokeColor(hexColor);
+        }
+        
+        // 投げ縄オーバーレイの色も更新
+        if (graph3dLassoOverlay && graph3dLassoActive) {
+          const hexColor = getGraph3dHighlightColorHex(normalized) || '#818CF8';
+          graph3dLassoOverlay.setStrokeColor(hexColor);
+        }
+        
         if (persist) schedulePersist();
       }
 
@@ -2426,6 +2480,535 @@ async function initDocMenuTable() {
           palette.style.transform = 'translate3d(-9999px, -9999px, 0)';
           if (clearTarget) graph3dHoverTargetNode = null;
         }, GRAPH3D_HOVER_PALETTE_FADE_MS);
+      }
+
+      function getGraph3dControls() {
+        if (!graph3dInstance || typeof graph3dInstance.controls !== 'function') return null;
+        try {
+          return graph3dInstance.controls();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function setGraph3dControlsEnabled(enabled) {
+        const controls = getGraph3dControls();
+        if (!controls) return;
+        if (typeof controls.enabled === 'boolean') {
+          controls.enabled = !!enabled;
+        }
+        if ('enableRotate' in controls) controls.enableRotate = !!enabled;
+        if ('enableZoom' in controls) controls.enableZoom = !!enabled;
+        if ('enablePan' in controls) controls.enablePan = !!enabled;
+        if (typeof controls.update === 'function') {
+          try { controls.update(); } catch (_) {}
+        }
+      }
+
+      function updateGraph3dPencilToggle() {
+        if (!graph3dPencilToggleEl) return;
+        const available = !state.graph3dCollapsed;
+        graph3dPencilToggleEl.classList.toggle('is-active', available && graph3dPencilActive);
+        graph3dPencilToggleEl.setAttribute('aria-pressed', available && graph3dPencilActive ? 'true' : 'false');
+        graph3dPencilToggleEl.disabled = available ? false : true;
+        graph3dPencilToggleEl.setAttribute('aria-disabled', available ? 'false' : 'true');
+        graph3dPencilToggleEl.title = available
+          ? (graph3dPencilActive ? '鉛筆ハイライトを終了' : '鉛筆で描いた線に近いノードをハイライト')
+          : '3Dビューが閉じているときは使用できません';
+        if (graph3dCanvasEl) {
+          graph3dCanvasEl.classList.toggle('is-pencil-active', available && graph3dPencilActive);
+          if (!graph3dPencilActive) {
+            graph3dCanvasEl.style.cursor = '';
+          }
+        }
+        // updateGraph3dPencilCanvasState();
+      }
+
+      function updateGraph3dLassoToggle() {
+        if (!graph3dLassoToggleEl) return;
+        const available = !state.graph3dCollapsed;
+        graph3dLassoToggleEl.classList.toggle('is-active', available && graph3dLassoActive);
+        graph3dLassoToggleEl.setAttribute('aria-pressed', available && graph3dLassoActive ? 'true' : 'false');
+        graph3dLassoToggleEl.disabled = available ? false : true;
+        graph3dLassoToggleEl.setAttribute('aria-disabled', available ? 'false' : 'true');
+        graph3dLassoToggleEl.title = available
+          ? (graph3dLassoActive ? '投げ縄ハイライトを終了' : '投げ縄で囲んだノードをハイライト')
+          : '3Dビューが閉じているときは使用できません';
+        if (graph3dCanvasEl) {
+          graph3dCanvasEl.classList.toggle('is-lasso-active', available && graph3dLassoActive);
+          if (!graph3dLassoActive) {
+            graph3dCanvasEl.style.cursor = '';
+          }
+        }
+      }
+
+
+      /* 旧実装 - PencilOverlayコンポーネントで置き換え
+      function ensureGraph3dPencilCanvas() {
+        if (!graph3dCanvasEl) return null;
+        
+        // SVGアプローチを使用
+        if (!graph3dPencilSvgEl) {
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.className = 'tb-3d-pencil-svg';
+          svg.style.position = 'absolute';
+          svg.style.top = '0';
+          svg.style.left = '0';
+          svg.style.width = '100%';
+          svg.style.height = '100%';
+          svg.style.zIndex = '10000';
+          svg.style.pointerEvents = 'none';
+          
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.style.fill = 'none';
+          path.style.stroke = '#818CF8';
+          path.style.strokeWidth = '4';
+          path.style.strokeLinejoin = 'round';
+          path.style.strokeLinecap = 'round';
+          svg.appendChild(path);
+          
+          graph3dPencilPathEl = path;
+          
+          // Three.jsのcanvasの親要素に追加
+          const wrapper = graph3dCanvasEl.closest('.tb-3d-wrapper');
+          if (wrapper) {
+            wrapper.appendChild(svg);
+            console.log('Pencil SVG added to wrapper');
+          } else {
+            graph3dCanvasEl.appendChild(svg);
+            console.log('Pencil SVG added to graph3dCanvasEl');
+          }
+          
+          graph3dPencilSvgEl = svg;
+        }
+        
+        // 従来のCanvas方式も保持（フォールバック用）
+        if (!graph3dPencilCanvasEl) {
+          const canvas = document.createElement('canvas');
+          canvas.className = 'tb-3d-pencil-canvas';
+          canvas.style.display = 'none'; // 初期は非表示
+          graph3dPencilCanvasEl = canvas;
+          graph3dPencilCtx = canvas.getContext('2d', { alpha: true });
+        }
+        
+        // resizeGraph3dPencilCanvas();
+        // updateGraph3dPencilCanvasState();
+        return graph3dPencilSvgEl;
+      }
+
+      */
+
+      /*
+      function resizeGraph3dPencilCanvas() {
+        if (!graph3dCanvasEl || !graph3dPencilCanvasEl) return;
+        
+        // wrapperまたはgraph3dCanvasElのサイズを取得
+        const wrapper = graph3dPencilCanvasEl.parentElement;
+        const referenceEl = wrapper && wrapper.classList.contains('tb-3d-wrapper') ? wrapper : graph3dCanvasEl;
+        const rect = referenceEl.getBoundingClientRect();
+        
+        const width = Math.max(1, Math.round(rect.width));
+        const height = Math.max(1, Math.round(rect.height));
+        
+        if (graph3dPencilCanvasEl.width !== width || graph3dPencilCanvasEl.height !== height) {
+          graph3dPencilCanvasEl.width = width;
+          graph3dPencilCanvasEl.height = height;
+          console.log('Pencil canvas resized to:', width, 'x', height);
+        }
+      }
+
+      */
+
+      /*
+      function clearGraph3dPencilCanvas() {
+        // SVGをクリア
+        if (graph3dPencilPathEl) {
+          graph3dPencilPathEl.setAttribute('d', '');
+        }
+        if (graph3dPencilSvgEl) {
+          graph3dPencilSvgEl.style.display = 'none';
+        }
+        
+        // Canvasもクリア
+        if (graph3dPencilCtx && graph3dPencilCanvasEl) {
+          graph3dPencilCtx.clearRect(0, 0, graph3dPencilCanvasEl.width, graph3dPencilCanvasEl.height);
+        }
+        
+        if (graph3dPencilFadeAnimationId) {
+          cancelAnimationFrame(graph3dPencilFadeAnimationId);
+          graph3dPencilFadeAnimationId = null;
+        }
+        graph3dPencilFadeStartTime = null;
+        graph3dPencilFinalPath = null;
+      }
+
+      */
+
+      /*
+      function animateGraph3dPencilFade() {
+        if (!graph3dPencilFinalPath || graph3dPencilFinalPath.length < 2) {
+          // clearGraph3dPencilCanvas();
+          return;
+        }
+        
+        const now = Date.now();
+        if (!graph3dPencilFadeStartTime) {
+          graph3dPencilFadeStartTime = now;
+        }
+        
+        const elapsed = now - graph3dPencilFadeStartTime;
+        const duration = 1000; // 1秒でフェードアウト
+        const progress = Math.min(elapsed / duration, 1);
+        const opacity = 1 - progress;
+        
+        if (opacity <= 0) {
+          // clearGraph3dPencilCanvas();
+          return;
+        }
+        
+        // SVGアニメーション
+        if (graph3dPencilPathEl && graph3dPencilSvgEl) {
+          let pathData = `M ${graph3dPencilFinalPath[0].x} ${graph3dPencilFinalPath[0].y}`;
+          for (let i = 1; i < graph3dPencilFinalPath.length; i++) {
+            pathData += ` L ${graph3dPencilFinalPath[i].x} ${graph3dPencilFinalPath[i].y}`;
+          }
+          pathData += ' Z';
+          
+          graph3dPencilPathEl.setAttribute('d', pathData);
+          graph3dPencilPathEl.style.opacity = opacity.toString();
+          graph3dPencilSvgEl.style.display = 'block';
+        }
+        
+        graph3dPencilFadeAnimationId = requestAnimationFrame(animateGraph3dPencilFade);
+      }
+
+      */
+
+      /*
+      function // drawGraph3dPencilPath(points, previewPoint = null) {
+        const basePoints = Array.isArray(points) ? points : [];
+        const hasPreview = previewPoint && Number.isFinite(previewPoint.x) && Number.isFinite(previewPoint.y);
+        const pathPoints = hasPreview ? basePoints.concat(previewPoint) : basePoints;
+        
+        if (!pathPoints || pathPoints.length < 1) {
+          // clearGraph3dPencilCanvas();
+          return;
+        }
+        
+        // ensureGraph3dPencilCanvas();
+        
+        // SVGパスを使用
+        if (graph3dPencilPathEl && graph3dPencilSvgEl) {
+          let pathData = '';
+          
+          if (pathPoints.length > 0) {
+            // スムーズな曲線を描くためにベジェ曲線を使用
+            if (pathPoints.length === 1) {
+              // 1点のみの場合は点を描画
+              pathData = `M ${pathPoints[0].x} ${pathPoints[0].y} L ${pathPoints[0].x} ${pathPoints[0].y}`;
+            } else if (pathPoints.length === 2) {
+              // 2点の場合は直線
+              pathData = `M ${pathPoints[0].x} ${pathPoints[0].y} L ${pathPoints[1].x} ${pathPoints[1].y}`;
+            } else {
+              // 3点以上の場合はスムーズな曲線
+              pathData = `M ${pathPoints[0].x} ${pathPoints[0].y}`;
+              for (let i = 1; i < pathPoints.length - 1; i++) {
+                const xc = (pathPoints[i].x + pathPoints[i + 1].x) / 2;
+                const yc = (pathPoints[i].y + pathPoints[i + 1].y) / 2;
+                pathData += ` Q ${pathPoints[i].x} ${pathPoints[i].y}, ${xc} ${yc}`;
+              }
+              // 最後の点
+              pathData += ` L ${pathPoints[pathPoints.length - 1].x} ${pathPoints[pathPoints.length - 1].y}`;
+            }
+          }
+          
+          graph3dPencilPathEl.setAttribute('d', pathData);
+          
+          // 色を更新（鉛筆なので塗りつぶしなし）
+          const color = getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8';
+          graph3dPencilPathEl.style.stroke = color;
+          graph3dPencilPathEl.style.fill = 'none';
+          
+          // SVGを表示
+          graph3dPencilSvgEl.style.display = 'block';
+          
+          console.log('Pencil SVG rendered:', {
+            pointCount: pathPoints.length,
+            color: color,
+            pathData: pathData.substring(0, 50) + '...'
+          });
+        }
+      }
+
+      */
+
+      /*
+      function // getGraph3dCanvasPoint(event) {
+        if (!graph3dCanvasEl || !event) return null;
+        
+        // SVG要素が存在する場合は、その座標系を使用
+        if (graph3dPencilSvgEl) {
+          const rect = graph3dPencilSvgEl.getBoundingClientRect();
+          return {
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top
+          };
+        }
+        
+        // 投げ縄キャンバスが存在する場合は、その座標系を使用
+        if (graph3dPencilCanvasEl) {
+          const rect = graph3dPencilCanvasEl.getBoundingClientRect();
+          return {
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top
+          };
+        }
+        
+        // 通常のキャンバスの座標系を使用
+        const rect = graph3dCanvasEl.getBoundingClientRect();
+        return {
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top
+        };
+      }
+
+      */
+
+      /*
+      function // cancelGraph3dPencilDrawing(options = {}) {
+        const { clear = false } = options || {};
+        if (graph3dPencilCaptureEl && graph3dPencilPointerId != null && typeof graph3dPencilCaptureEl.releasePointerCapture === 'function') {
+          try { graph3dPencilCaptureEl.releasePointerCapture(graph3dPencilPointerId); } catch (_) {}
+        }
+        graph3dPencilPointerId = null;
+        graph3dPencilCaptureEl = null;
+        graph3dPencilDrawing = false;
+        graph3dPencilPoints = [];
+        graph3dPencilPreviewPoint = null;
+        setGraph3dControlsEnabled(!graph3dPencilActive);
+        // updateGraph3dPencilCanvasState();
+        if (clear) // clearGraph3dPencilCanvas();
+      }
+
+      */
+
+      /*
+      function // finishGraph3dPencil({ commit = false } = {}) {
+        if (!graph3dPencilDrawing) return;
+        const points = graph3dPencilPoints.slice();
+        // cancelGraph3dPencilDrawing();
+        
+        if (commit && points.length >= 1) {
+          // 鉛筆パスを保存してフェードアウトアニメーションを開始
+          graph3dPencilFinalPath = points;
+          graph3dPencilFadeStartTime = null;
+          animateGraph3dPencilFade();
+          applyGraph3dPencilSelection(points);
+        } else {
+          // clearGraph3dPencilCanvas();
+        }
+      }
+      */
+
+      function setGraph3dPencilActive(next) {
+        const available = !state.graph3dCollapsed;
+        const target = available && !!next;
+        if (graph3dPencilActive === target) {
+          updateGraph3dPencilToggle();
+          return;
+        }
+        graph3dPencilActive = target;
+        
+        // 投げ縄がアクティブなら無効化
+        if (graph3dPencilActive && graph3dLassoActive) {
+          setGraph3dLassoActive(false);
+        }
+        
+        if (graph3dCanvasEl) {
+          graph3dCanvasEl.classList.toggle('is-pencil-active', graph3dPencilActive);
+          graph3dCanvasEl.style.cursor = graph3dPencilActive ? 'crosshair' : '';
+        }
+        
+        // オーバーレイの状態を更新
+        if (graph3dPencilOverlay) {
+          graph3dPencilOverlay.setActive(graph3dPencilActive);
+          
+          // 色を更新
+          if (graph3dPencilActive) {
+            const color = getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8';
+            graph3dPencilOverlay.setStrokeColor(color);
+          }
+        }
+        
+        // Three.jsのコントロールを無効化/有効化
+        setGraph3dControlsEnabled(!graph3dPencilActive);
+        updateGraph3dPencilToggle();
+      }
+
+      function setGraph3dLassoActive(next) {
+        const available = !state.graph3dCollapsed;
+        const target = available && !!next;
+        if (graph3dLassoActive === target) {
+          updateGraph3dLassoToggle();
+          return;
+        }
+        graph3dLassoActive = target;
+        
+        // 鉛筆がアクティブなら無効化
+        if (graph3dLassoActive && graph3dPencilActive) {
+          setGraph3dPencilActive(false);
+        }
+        
+        if (graph3dCanvasEl) {
+          graph3dCanvasEl.classList.toggle('is-lasso-active', graph3dLassoActive);
+          graph3dCanvasEl.style.cursor = graph3dLassoActive ? 'crosshair' : '';
+        }
+        
+        // オーバーレイの状態を更新
+        if (graph3dLassoOverlay) {
+          graph3dLassoOverlay.setActive(graph3dLassoActive);
+          
+          // 色を更新
+          if (graph3dLassoActive) {
+            const color = getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8';
+            graph3dLassoOverlay.setStrokeColor(color);
+          }
+        }
+        
+        // Three.jsのコントロールを無効化/有効化
+        setGraph3dControlsEnabled(!graph3dLassoActive);
+        updateGraph3dLassoToggle();
+      }
+
+      function applyGraph3dPencilSelection(points) {
+        if (!graph3dInstance || !graph3dCanvasEl || !Array.isArray(points) || points.length < 1) return;
+        if (!window.THREE) return;
+        const camera = typeof graph3dInstance.camera === 'function' ? graph3dInstance.camera() : null;
+        if (!camera || typeof camera.updateMatrixWorld !== 'function') return;
+        camera.updateMatrixWorld();
+        const width = graph3dCanvasEl.clientWidth || graph3dCanvasEl.offsetWidth || 0;
+        const height = graph3dCanvasEl.clientHeight || graph3dCanvasEl.offsetHeight || 0;
+        if (!width || !height) return;
+        const data = graph3dInstance.graphData && graph3dInstance.graphData();
+        const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
+        if (!nodes.length) return;
+        const colorKey = ensureActiveHighlightColor();
+        const vector = new THREE.Vector3();
+        let changed = false;
+        let selectedCount = 0;
+        
+        // 線からの距離の閾値（ピクセル単位）
+        const threshold = 20;
+        
+        // 点から線分までの最短距離を計算する関数
+        function distanceToLineSegment(point, lineStart, lineEnd) {
+          const dx = lineEnd.x - lineStart.x;
+          const dy = lineEnd.y - lineStart.y;
+          const lengthSquared = dx * dx + dy * dy;
+          
+          if (lengthSquared === 0) {
+            // 線分の始点と終点が同じ場合
+            const dpx = point.x - lineStart.x;
+            const dpy = point.y - lineStart.y;
+            return Math.sqrt(dpx * dpx + dpy * dpy);
+          }
+          
+          let t = ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / lengthSquared;
+          t = Math.max(0, Math.min(1, t));
+          
+          const nearestX = lineStart.x + t * dx;
+          const nearestY = lineStart.y + t * dy;
+          const dpx = point.x - nearestX;
+          const dpy = point.y - nearestY;
+          
+          return Math.sqrt(dpx * dpx + dpy * dpy);
+        }
+        
+        // 点から描画パスまでの最短距離を計算
+        function distanceToPath(point, pathPoints) {
+          let minDistance = Infinity;
+          
+          for (let i = 0; i < pathPoints.length - 1; i++) {
+            const distance = distanceToLineSegment(point, pathPoints[i], pathPoints[i + 1]);
+            minDistance = Math.min(minDistance, distance);
+          }
+          
+          return minDistance;
+        }
+        
+        nodes.forEach((node) => {
+          if (!node) return;
+          const x = Number.isFinite(node.x) ? node.x : 0;
+          const y = Number.isFinite(node.y) ? node.y : 0;
+          const z = Number.isFinite(node.z) ? node.z : 0;
+          vector.set(x, y, z).project(camera);
+          const screenX = (vector.x * 0.5 + 0.5) * width;
+          const screenY = (-vector.y * 0.5 + 0.5) * height;
+          if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return;
+          
+          // 描画パスからの距離を計算
+          const nodePoint = { x: screenX, y: screenY };
+          const distance = distanceToPath(nodePoint, points);
+          
+          // 距離が閾値以内の場合は選択
+          if (distance <= threshold) {
+            const result = setGraph3dManualHighlightColor(node, colorKey, { persist: false });
+            if (!result || result.action === 'none') return;
+            selectedCount += 1;
+            if (result.changed) changed = true;
+          }
+        });
+        
+        if (selectedCount > 0) {
+          updateHighlightPaletteUI();
+          applyGraph3dHighlightNodes({ forceRefresh: true });
+          updateGraph3dHoverPaletteSelection(colorKey);
+          if (changed) schedulePersist();
+        }
+      }
+
+      function applyGraph3dLassoSelection(points) {
+        if (!graph3dInstance || !graph3dCanvasEl || !Array.isArray(points) || points.length < 3) return;
+        if (!window.THREE) return;
+        const camera = typeof graph3dInstance.camera === 'function' ? graph3dInstance.camera() : null;
+        if (!camera || typeof camera.updateMatrixWorld !== 'function') return;
+        camera.updateMatrixWorld();
+        const width = graph3dCanvasEl.clientWidth || graph3dCanvasEl.offsetWidth || 0;
+        const height = graph3dCanvasEl.clientHeight || graph3dCanvasEl.offsetHeight || 0;
+        if (!width || !height) return;
+        const data = graph3dInstance.graphData && graph3dInstance.graphData();
+        const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
+        if (!nodes.length) return;
+        const colorKey = ensureActiveHighlightColor();
+        const vector = new THREE.Vector3();
+        let changed = false;
+        let selectedCount = 0;
+        
+        nodes.forEach((node) => {
+          if (!node) return;
+          const x = Number.isFinite(node.x) ? node.x : 0;
+          const y = Number.isFinite(node.y) ? node.y : 0;
+          const z = Number.isFinite(node.z) ? node.z : 0;
+          vector.set(x, y, z).project(camera);
+          const screenX = (vector.x * 0.5 + 0.5) * width;
+          const screenY = (-vector.y * 0.5 + 0.5) * height;
+          if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return;
+          
+          // ポリゴン内かどうかチェック
+          if (!isPointInPolygon({ x: screenX, y: screenY }, points)) return;
+          
+          const result = setGraph3dManualHighlightColor(node, colorKey, { persist: false });
+          if (!result || result.action === 'none') return;
+          selectedCount += 1;
+          if (result.changed) changed = true;
+        });
+        
+        if (selectedCount > 0) {
+          updateHighlightPaletteUI();
+          applyGraph3dHighlightNodes({ forceRefresh: true });
+          updateGraph3dHoverPaletteSelection(colorKey);
+          if (changed) schedulePersist();
+        }
       }
 
       function toggleGraph3dManualHighlight(node, explicitColorKey = null) {
@@ -4687,12 +5270,17 @@ async function initDocMenuTable() {
                 <span class="tb-3d-search-count" id="taskboard3dSearchCount" aria-live="polite"></span>
                 <ul id="taskboard3dSearchResults" class="tb-3d-search-results" role="listbox" aria-label="検索結果" aria-live="polite"></ul>
                 <div class="tb-3d-glow-toggle-row">
-                  <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true" aria-label="実装ハイライト ON" title="画像・動画以外のノードを暗くして実装中ノードを強調します">
+                  <button type="button" id="taskboard3dDimToggle" class="tb-3d-dim-toggle" aria-pressed="true" aria-label="実装ハイライトをOFFにする" title="画像・動画以外のノードを暗くして実装中ノードを強調します">
                     <span class="tb-3d-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 4h2.6l1.7 1.7-2.3 2.3"></path><path d="M11.5 4 6.8 8.7"></path><path d="M6.8 8.7 11 12.9"></path><path d="m9.7 14.2-2.9 2.9"></path><path d="m5.4 10.5-2 2"></path></svg></span>
-                    <span class="tb-3d-dim-state" data-dim-state>ON</span>
                   </button>
                   <button type="button" id="taskboard3dReload" class="tb-3d-reload" aria-label="3Dデータを再読み込み" title="3Dデータを再読み込み">
                     <span class="tb-3d-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 7.5v-4h-4"></path><path d="M15.5 7.5a6 6 0 1 1-3.5-5.3"></path></svg></span>
+                  </button>
+                  <button type="button" id="taskboard3dPencilToggle" class="tb-3d-pencil-toggle" aria-pressed="false" aria-label="鉛筆ハイライト" title="鉛筆で描いた線に近いノードをハイライト">
+                    <span class="tb-3d-pencil-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 2.5l5 5L6 19H1v-5L12.5 2.5z"></path><path d="M9 6l5 5"></path></svg></span>
+                  </button>
+                  <button type="button" id="taskboard3dLassoToggle" class="tb-3d-lasso-toggle" aria-pressed="false" aria-label="投げ縄ハイライト" title="投げ縄で囲んだノードをハイライト">
+                    <span class="tb-3d-lasso-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.8c0-1.8 1.5-3.3 3.3-3.3h4.4c1.5 0 2.8 1.2 2.8 2.8 0 1.5-1.2 2.8-2.8 2.8H9.1c-2.1 0-3.8 1.7-3.8 3.8 0 1.7 1.4 3.1 3.1 3.1h1.2c1 0 1.9.8 1.9 1.9 0 1-.8 1.9-1.9 1.9H7"/></svg></span>
                   </button>
                   <button type="button" id="taskboard3dGlowToggle" class="tb-3d-glow-toggle" aria-expanded="false" aria-pressed="false" aria-controls="taskboard3dGlowControls" aria-label="発光設定" title="発光設定">
                     <span class="tb-3d-glow-toggle-icon" aria-hidden="true">
@@ -4821,9 +5409,10 @@ async function initDocMenuTable() {
     graph3dSearchCountEl = panel.querySelector('#taskboard3dSearchCount');
     graph3dSearchResultsEl = panel.querySelector('#taskboard3dSearchResults');
     graph3dDimToggleEl = panel.querySelector('#taskboard3dDimToggle');
-    graph3dDimToggleStateEl = graph3dDimToggleEl ? graph3dDimToggleEl.querySelector('[data-dim-state]') : null;
     graph3dGlowToggleEl = panel.querySelector('#taskboard3dGlowToggle');
     graph3dGlowControlsEl = panel.querySelector('#taskboard3dGlowControls');
+    graph3dPencilToggleEl = panel.querySelector('#taskboard3dPencilToggle');
+    graph3dLassoToggleEl = panel.querySelector('#taskboard3dLassoToggle');
     graph3dHighlightPickerEl = panel.querySelector('#taskboard3dHighlightPicker');
     graph3dPaletteBarEl = panel.querySelector('#taskboardPaletteBar');
     if (graph3dHighlightPickerEl && !graph3dHighlightPickerEl._tbBound) {
@@ -4845,16 +5434,67 @@ async function initDocMenuTable() {
       });
       graph3dPaletteBarEl._tbBound = true;
     }
+    if (graph3dPencilToggleEl && !graph3dPencilToggleEl._tbBound) {
+      graph3dPencilToggleEl.addEventListener('click', () => {
+        setGraph3dPencilActive(!graph3dPencilActive);
+      });
+      graph3dPencilToggleEl._tbBound = true;
+      
+      // 鉛筆オーバーレイを初期化
+      if (window.PencilOverlay && graph3dCanvasEl && !graph3dPencilOverlay) {
+        const wrapper = graph3dCanvasEl.closest('.tb-3d-wrapper') || graph3dCanvasEl;
+        graph3dPencilOverlay = new PencilOverlay(wrapper, {
+          strokeColor: getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8',
+          strokeWidth: 4,
+          fadeOutDuration: 1000,
+          selectionThreshold: 20
+        });
+        
+        // 選択完了時のコールバック
+        graph3dPencilOverlay.onSelectionComplete((points) => {
+          if (points && points.length > 0) {
+            applyGraph3dPencilSelection(points);
+          }
+        });
+      }
+    }
+    if (graph3dLassoToggleEl && !graph3dLassoToggleEl._tbBound) {
+      graph3dLassoToggleEl.addEventListener('click', () => {
+        setGraph3dLassoActive(!graph3dLassoActive);
+      });
+      graph3dLassoToggleEl._tbBound = true;
+      
+      // 投げ縄オーバーレイを初期化
+      if (window.LassoOverlay && graph3dCanvasEl && !graph3dLassoOverlay) {
+        const wrapper = graph3dCanvasEl.closest('.tb-3d-wrapper') || graph3dCanvasEl;
+        graph3dLassoOverlay = new LassoOverlay(wrapper, {
+          strokeColor: getGraph3dHighlightColorHex(state.graph3dActiveHighlightColor) || '#818CF8',
+          strokeWidth: 3,
+          fillOpacity: 0.2,
+          fadeOutDuration: 1000,
+          minPoints: 3
+        });
+        
+        // 選択完了時のコールバック
+        graph3dLassoOverlay.onSelectionComplete((points) => {
+          if (points && points.length >= 3) {
+            applyGraph3dLassoSelection(points);
+          }
+        });
+      }
+    }
     if (graph3dCanvasEl && !graph3dCanvasEl._tbHoverPointerBound) {
       graph3dCanvasEl.addEventListener('pointermove', (event) => {
+        if (!graph3dHoverPointer || graph3dHoverPaletteBlocker) return;
+        if (state.graph3dCollapsed) return;
         graph3dHoverPointer.x = event.clientX;
         graph3dHoverPointer.y = event.clientY;
         updateGraph3dHoverPalettePosition();
-      });
+      }, { capture: true });
       graph3dCanvasEl.addEventListener('pointerenter', () => {
         cancelGraph3dHoverPaletteHide();
       });
-      graph3dCanvasEl.addEventListener('pointerleave', () => {
+      graph3dCanvasEl.addEventListener('pointerleave', (event) => {
         scheduleGraph3dHoverPaletteHide({ delay: 120 });
       });
       graph3dCanvasEl._tbHoverPointerBound = true;
@@ -4866,7 +5506,10 @@ async function initDocMenuTable() {
     setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
     updateGraph3dInfoVisibility();
     if (!graph3dInfoResizeBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-      const resizeHandler = () => requestAnimationFrame(updateGraph3dInfoVisibility);
+      const resizeHandler = () => requestAnimationFrame(() => {
+        updateGraph3dInfoVisibility();
+        // resizeGraph3dPencilCanvas();
+      });
       window.addEventListener('resize', resizeHandler);
       graph3dInfoResizeBound = true;
     }
@@ -6300,7 +6943,11 @@ async function initDocMenuTable() {
           scheduleGraph3dHoverPaletteHide({ delay: force ? 0 : 160, force });
         }
         if (graph3dCanvasEl) {
-          graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+          if (graph3dPencilActive) {
+            graph3dCanvasEl.style.cursor = '';
+          } else {
+            graph3dCanvasEl.style.cursor = node ? 'pointer' : '';
+          }
         }
         if (node && node.type === 'video') {
           startGraph3dVideoForNode(node);
@@ -6486,6 +7133,7 @@ async function initDocMenuTable() {
               if (entry.target === graph3dCanvasEl) {
                 const { width: w, height: h } = entry.contentRect || {};
                 applyGraphDimensions(w, h, true);
+                // resizeGraph3dPencilCanvas();
               }
             }
           });
@@ -6496,6 +7144,8 @@ async function initDocMenuTable() {
             graph3dSetStatus('3Dビューの初期化に失敗しました。', 'error');
           }
         }, 1200);
+        setGraph3dControlsEnabled(!graph3dPencilActive);
+        // updateGraph3dPencilCanvasState();
       } catch (_) {}
 
       const rootNode = Array.isArray(data?.nodes) ? data.nodes.find(n => n.type === 'root') : null;
@@ -6506,6 +7156,7 @@ async function initDocMenuTable() {
       if (state.graph3dCollapsed) return null;
       const { forceReload = false } = options || {};
       if (graph3dLoadPromise) return graph3dLoadPromise;
+      // cancelGraph3dPencilDrawing({ clear: true });
       if (!forceReload && graph3dInstance && graph3dDataCache) {
         graph3dSetStatus('', 'success');
         return Promise.resolve(graph3dInstance);
@@ -6654,15 +7305,12 @@ async function initDocMenuTable() {
       graph3dDimToggleEl.setAttribute('aria-pressed', active ? 'true' : 'false');
       graph3dDimToggleEl.disabled = !!state.graph3dCollapsed;
       graph3dDimToggleEl.setAttribute('aria-disabled', state.graph3dCollapsed ? 'true' : 'false');
-      if (graph3dDimToggleStateEl) {
-        graph3dDimToggleStateEl.textContent = active ? 'ON' : 'OFF';
-        graph3dDimToggleStateEl.setAttribute('data-state', active ? 'on' : 'off');
-      }
+      graph3dDimToggleEl.setAttribute('data-state', active ? 'on' : 'off');
       const tooltip = active
         ? '画像・動画以外のノードを暗くして実装中ノードを強調します'
         : '画像・動画以外のノードも通常の明るさで表示します';
       graph3dDimToggleEl.title = tooltip;
-      graph3dDimToggleEl.setAttribute('aria-label', `実装ハイライト ${active ? 'ON' : 'OFF'}`);
+      graph3dDimToggleEl.setAttribute('aria-label', active ? '実装ハイライトをOFFにする' : '実装ハイライトをONにする');
     }
 
     function renderGraph3dPanel() {
@@ -6672,6 +7320,8 @@ async function initDocMenuTable() {
       updateGraph3dInfoVisibility();
       updateGraph3dSearchState();
       updateGraph3dDimToggle();
+      updateGraph3dPencilToggle();
+      updateGraph3dLassoToggle();
       setGraph3dGlowControlsOpen(state.graph3dGlowControlsOpen);
       updateViewMode();
       if (state.graph3dCollapsed) {
@@ -6692,6 +7342,7 @@ async function initDocMenuTable() {
       state.graph3dCollapsed = next;
       if (next) {
         state.graph3dGlowControlsOpen = false;
+        setGraph3dPencilActive(false);
       }
       renderGraph3dPanel();
       if (!next) setOpen(true);
