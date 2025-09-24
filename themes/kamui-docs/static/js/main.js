@@ -1592,6 +1592,7 @@ async function initDocMenuTable() {
         console.error('[TaskBoard] Storage module not loaded! Make sure taskboard-storage.js is included.');
         return;
       }
+      let isExpanded = false; // ここで宣言
       const MAX_TASK_HISTORY = 40;
       const MAX_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 14; // 14日間保持
       const MAX_LOG_LENGTH = 20000; // 20KBぶんだけ保持
@@ -7195,8 +7196,12 @@ async function initDocMenuTable() {
       const graphInitializer = forceGraphFn();
       if (typeof graphInitializer !== 'function') return;
       const Graph = graphInitializer(container);
-      if (!Graph) return;
+      if (!Graph) {
+        console.error('[TaskBoard] Failed to initialize 3D graph');
+        return;
+      }
       graph3dInstance = Graph;
+      console.log('[TaskBoard] 3D graph instance created successfully');
       graph3dAutoFitLocked = false;
       graph3dHasInitialFit = false;
       const focusGraph3dCameraOnNode = (targetNode, { distance = 180, duration = 600 } = {}) => {
@@ -7432,6 +7437,11 @@ async function initDocMenuTable() {
           Graph.refresh();
         }
         graph3dRenderer = Graph.renderer && typeof Graph.renderer === 'function' ? Graph.renderer() : null;
+        
+        // レンダラーが正しく初期化されているか確認
+        if (!graph3dRenderer) {
+          console.error('[TaskBoard] 3D renderer not initialized properly');
+        }
         if (graph3dRenderer && window.THREE) {
           if ('outputColorSpace' in graph3dRenderer && window.THREE.SRGBColorSpace) {
             graph3dRenderer.outputColorSpace = window.THREE.SRGBColorSpace;
@@ -7475,6 +7485,12 @@ async function initDocMenuTable() {
     async function ensureGraph3dInitialized(options = {}) {
       if (state.graph3dCollapsed) return null;
       const { forceReload = false } = options || {};
+      
+      // forceReloadの場合は既存のプロミスをクリア
+      if (forceReload && graph3dLoadPromise) {
+        graph3dLoadPromise = null;
+      }
+      
       if (graph3dLoadPromise) return graph3dLoadPromise;
       // cancelGraph3dPencilDrawing({ clear: true });
       if (!forceReload && graph3dInstance && graph3dDataCache) {
@@ -7482,12 +7498,26 @@ async function initDocMenuTable() {
         return Promise.resolve(graph3dInstance);
       }
       graph3dLoadPromise = (async () => {
-        graph3dSetStatus('ディレクトリを解析中...', 'loading');
+        graph3dSetStatus(forceReload ? '3Dデータを再構築中...' : 'ディレクトリを解析中...', 'loading');
         if (graph3dReloadEl) {
           graph3dReloadEl.disabled = true;
           graph3dReloadEl.classList.add('is-loading');
         }
         graph3dPinnedNode = null;
+        
+        // forceReloadの場合は既存のインスタンスとキャッシュをクリア
+        if (forceReload) {
+          if (graph3dInstance && typeof graph3dInstance._destructor === 'function') {
+            try { graph3dInstance._destructor(); } catch (_) {}
+          }
+          graph3dInstance = null;
+          graph3dDataCache = null;
+          // コンテナも強制的に再作成
+          if (graph3dCanvasContainer && graph3dCanvasContainer.parentNode) {
+            graph3dCanvasContainer.parentNode.removeChild(graph3dCanvasContainer);
+          }
+          graph3dCanvasContainer = null;
+        }
         if (graph3dSearchInputEl && graph3dSearchInputEl.value && graph3dSearchInputEl.value.trim()) {
           renderGraph3dSearchMessage('3Dデータを解析中です...');
           updateGraph3dSearchCount();
@@ -7517,7 +7547,24 @@ async function initDocMenuTable() {
           if (!nodeCount || nodeCount <= 1) {
             graph3dSetStatus('表示できるノードがありません。SCAN_PATHの内容を確認してください。', 'info');
           } else {
-            graph3dSetStatus('', 'success');
+            if (forceReload) {
+              graph3dSetStatus(`3Dデータの再読み込みが完了しました (${nodeCount}ノード)`, 'success');
+              // 成功メッセージを3秒後に消す
+              setTimeout(() => {
+                graph3dSetStatus('', 'success');
+                // 3Dビューが正しく表示されているか確認
+                if (graph3dStatusEl && !graph3dStatusEl.classList.contains('is-hidden')) {
+                  console.warn('[TaskBoard] 3D placeholder still visible after reload');
+                  graph3dStatusEl.classList.add('is-hidden');
+                }
+                // キャンバスコンテナが表示されているか確認
+                if (graph3dCanvasContainer && graph3dCanvasContainer.style.display === 'none') {
+                  graph3dCanvasContainer.style.display = '';
+                }
+              }, 3000);
+            } else {
+              graph3dSetStatus('', 'success');
+            }
           }
           return graph3dInstance;
         } catch (err) {
@@ -8187,12 +8234,51 @@ async function initDocMenuTable() {
       updateGraph3dGlowToggle();
     }
     if (graph3dReloadEl) {
-      graph3dReloadEl.addEventListener('click', (e) => {
+      graph3dReloadEl.addEventListener('click', async (e) => {
         e.preventDefault();
-        if (state.graph3dCollapsed) {
-          setGraph3dCollapsed(false);
+        if (graph3dReloadEl.classList.contains('is-loading')) return;
+        
+        // ローディング状態を設定
+        graph3dReloadEl.classList.add('is-loading');
+        graph3dReloadEl.setAttribute('aria-busy', 'true');
+        graph3dReloadEl.setAttribute('aria-label', 'データを再読み込み中...');
+        
+        // より明確なローディングメッセージ
+        graph3dSetStatus('3Dデータを再読み込み中...', 'loading');
+        
+        try {
+          // 3Dビューが折りたたまれている場合は展開
+          if (state.graph3dCollapsed) {
+            setGraph3dCollapsed(false);
+            // 展開アニメーションを待つ
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+          
+          const result = await ensureGraph3dInitialized({ forceReload: true });
+          
+          // 再読み込み完了後、3Dビューを再レンダリング
+          renderGraph3dPanel();
+          
+          // 3Dインスタンスのリフレッシュを強制
+          if (result && typeof result.refresh === 'function') {
+            setTimeout(() => {
+              try {
+                result.refresh();
+                console.log('[TaskBoard] 3D view refreshed after reload');
+              } catch (err) {
+                console.warn('[TaskBoard] Failed to refresh 3D view:', err);
+              }
+            }, 100);
+          }
+        } catch (err) {
+          console.error('[TaskBoard] 3D reload failed:', err);
+          graph3dSetStatus('再読み込みに失敗しました', 'error');
+        } finally {
+          // ローディング状態を解除
+          graph3dReloadEl.classList.remove('is-loading');
+          graph3dReloadEl.setAttribute('aria-busy', 'false');
+          graph3dReloadEl.setAttribute('aria-label', '3Dデータを再読み込み');
         }
-        ensureGraph3dInitialized({ forceReload: true }).catch(() => {});
       });
     }
     if (graph3dInfoToggleEl) {
@@ -9880,7 +9966,6 @@ async function initDocMenuTable() {
     
     // 拡大ボタンのイベント処理
     const expandBtn = panel.querySelector('#taskboardExpandToggle');
-    let isExpanded = false;
     
     expandBtn?.addEventListener('click', () => {
       isExpanded = !isExpanded;
