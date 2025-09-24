@@ -6613,14 +6613,14 @@ async function initDocMenuTable() {
         transparent: true,
         opacity: style.isHighlight ? 0.95 : (style.shouldDim ? 0.7 : 0.85), // 初期状態はほぼ不透明
         toneMapped: false,
-        depthTest: true,
+        depthTest: false, // 深度テストを無効にして常に前面に表示
         depthWrite: false // 深度バッファに書き込まない
       });
       const width = node.type === 'image' ? 26 : 24;
       const height = width * (node.type === 'image' ? 0.68 : 0.62);
       const sprite = new THREE.Sprite(spriteMaterial);
       sprite.scale.set(width, height, 1);
-      sprite.renderOrder = 1; // スプライトを前面に
+      sprite.renderOrder = 100; // リンクより前面に表示
       group.add(sprite);
 
       const frameMaterial = new THREE.SpriteMaterial({
@@ -6628,13 +6628,13 @@ async function initDocMenuTable() {
         transparent: true,
         opacity: style.isHighlight ? 0.5 : (style.shouldDim ? 0.18 : 0.32),
         toneMapped: false,
-        depthTest: true,
+        depthTest: false, // 深度テストを無効にして常に前面に表示
         depthWrite: false // 深度バッファに書き込まない
       });
       const frame = new THREE.Sprite(frameMaterial);
       frame.scale.set(width * 1.08, height * 1.08, 1);
       frame.position.set(0, 0, -0.1);
-      frame.renderOrder = -1; // フレームを背面に
+      frame.renderOrder = 99; // フレームもリンクより前面に（スプライトよりは後ろ）
       group.add(frame);
 
       if (node.type === 'video') {
