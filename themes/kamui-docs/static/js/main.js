@@ -1819,12 +1819,6 @@ async function initDocMenuTable() {
       let graph3dLastCanvasSize = { width: 0, height: 0 };
       let graph3dHasInitialFit = false;
       let graph3dAutoFitLocked = false;
-      // メディア読み込みの制御
-      let graph3dMediaLoadingEnabled = false;
-      let graph3dMediaLoadingQueue = [];
-      let graph3dMediaLoadingInProgress = false;
-      const GRAPH3D_MEDIA_BATCH_SIZE = 10; // 一度に読み込むメディアの数
-      const GRAPH3D_MEDIA_LOAD_DELAY = 2000; // グラフ展開後の待機時間（ミリ秒）
       // Bloom関連の変数
       let graph3dBloomComposer = null;
       let graph3dFinalComposer = null;
@@ -5803,7 +5797,7 @@ async function initDocMenuTable() {
     }
     if (graph3dCanvasEl && !graph3dCanvasEl._tbHoverPointerBound) {
       graph3dCanvasEl.addEventListener('pointermove', (event) => {
-        if (!graph3dHoverPointer || graph3dHoverPaletteBlocker) return;
+        if (!graph3dHoverPointer || graph3dLassoActive) return;
         if (state.graph3dCollapsed) return;
         graph3dHoverPointer.x = event.clientX;
         graph3dHoverPointer.y = event.clientY;
@@ -6459,15 +6453,15 @@ async function initDocMenuTable() {
       return texture;
     }
 
-    function loadImageTexture(node) {
-      return new Promise((resolve, reject) => {
-        if (!window.THREE) {
-          reject(new Error('THREE unavailable'));
-          return;
-        }
+    function processImageLoadQueue() {
+      while (graph3dActiveImageLoads < MAX_PARALLEL_IMAGE_LOADS && graph3dImageLoadQueue.length > 0) {
+        const { node, resolve, reject } = graph3dImageLoadQueue.shift();
+        graph3dActiveImageLoads++;
+        
         const url = buildGraph3dMediaUrl(node);
         const img = new Image();
         img.crossOrigin = 'anonymous';
+        
         img.onload = () => {
           try {
             const texture = new THREE.Texture(img);
@@ -6476,10 +6470,34 @@ async function initDocMenuTable() {
             resolve(texture);
           } catch (err) {
             reject(err);
+          } finally {
+            graph3dActiveImageLoads--;
+            processImageLoadQueue(); // 次の画像を処理
           }
         };
-        img.onerror = reject;
+        
+        img.onerror = (err) => {
+          reject(err);
+          graph3dActiveImageLoads--;
+          processImageLoadQueue(); // 次の画像を処理
+        };
+        
         img.src = url;
+      }
+    }
+    
+    function loadImageTexture(node) {
+      return new Promise((resolve, reject) => {
+        if (!window.THREE) {
+          reject(new Error('THREE unavailable'));
+          return;
+        }
+        
+        // キューに追加
+        graph3dImageLoadQueue.push({ node, resolve, reject });
+        
+        // キュー処理を開始
+        processImageLoadQueue();
       });
     }
 
@@ -6573,43 +6591,10 @@ async function initDocMenuTable() {
     }
 
     const graph3dMediaTexturePromises = new Map();
+    let graph3dImageLoadQueue = [];
+    let graph3dActiveImageLoads = 0;
+    const MAX_PARALLEL_IMAGE_LOADS = 4; // 同時に読み込む画像の最大数（多すぎると負荷でカクつく）
     
-    function getGraph3dMediaPlaceholder(node, cacheKey) {
-      if (!window.THREE) return getGraph3dSphereObject(node, cacheKey);
-      const group = new THREE.Group();
-      const style = graph3dResolveNodeVisual(node);
-      
-      // メディアタイプに応じた簡易的なプレースホルダー
-      const isVideo = node.type === 'video';
-      const color = new THREE.Color(style.colorHex);
-      const opacity = style.isHighlight ? 0.85 : (style.shouldDim ? 0.45 : 0.65);
-      
-      // シンプルなSprite プレースホルダーを作成（より軽量）
-      const spriteMaterial = new THREE.SpriteMaterial({
-        color: color,
-        opacity: opacity * 0.8,
-        transparent: true,
-        toneMapped: false
-      });
-      
-      const width = isVideo ? 20 : 18;
-      const height = isVideo ? 13 : 12;
-      const sprite = new THREE.Sprite(spriteMaterial);
-      sprite.scale.set(width, height, 1);
-      group.add(sprite);
-      
-      // キャッシュに保存
-      if (cacheKey) {
-        graph3dNodeObjectCache.set(cacheKey, { 
-          object: group, 
-          resourceKey: null, 
-          controls: null,
-          isPlaceholder: true // プレースホルダーであることを記録
-        });
-      }
-      
-      return group;
-    }
 
     function getGraph3dMediaObject(node, cacheKey) {
       if (!window.THREE) return getGraph3dSphereObject(node, cacheKey);
@@ -6618,36 +6603,38 @@ async function initDocMenuTable() {
         return cached?.object || cached;
       }
       
-      // メディア読み込みが無効な場合は、プレースホルダーを表示
-      if (!graph3dMediaLoadingEnabled) {
-        return getGraph3dMediaPlaceholder(node, cacheKey);
-      }
       const group = new THREE.Group();
       const style = graph3dResolveNodeVisual(node);
       const hasHighlights = graph3dActiveHighlightNodeIds.size > 0;
       const baseColor = new THREE.Color(style.colorHex);
       const spriteTint = baseColor.clone().lerp(new THREE.Color('#f5f7ff'), style.isHighlight ? 0.25 : 0.12);
       const spriteMaterial = new THREE.SpriteMaterial({
-        color: spriteTint,
+        color: baseColor, // 初期状態はノードの色を表示
         transparent: true,
-        opacity: style.isHighlight ? 0.98 : (style.isMediaAsset ? 0.92 : (style.shouldDim ? Math.max(0.6, style.opacity) : style.opacity)),
-        toneMapped: false
+        opacity: style.isHighlight ? 0.95 : (style.shouldDim ? 0.7 : 0.85), // 初期状態はほぼ不透明
+        toneMapped: false,
+        depthTest: true,
+        depthWrite: false // 深度バッファに書き込まない
       });
       const width = node.type === 'image' ? 26 : 24;
       const height = width * (node.type === 'image' ? 0.68 : 0.62);
       const sprite = new THREE.Sprite(spriteMaterial);
       sprite.scale.set(width, height, 1);
+      sprite.renderOrder = 1; // スプライトを前面に
       group.add(sprite);
 
       const frameMaterial = new THREE.SpriteMaterial({
         color: new THREE.Color(graph3dMixHexColors(style.colorHex, '#ffffff', style.isHighlight ? 0.6 : (style.shouldDim ? 0.32 : 0.45))),
         transparent: true,
         opacity: style.isHighlight ? 0.5 : (style.shouldDim ? 0.18 : 0.32),
-        toneMapped: false
+        toneMapped: false,
+        depthTest: true,
+        depthWrite: false // 深度バッファに書き込まない
       });
       const frame = new THREE.Sprite(frameMaterial);
       frame.scale.set(width * 1.08, height * 1.08, 1);
-      frame.position.set(0, 0, -0.02);
+      frame.position.set(0, 0, -0.1);
+      frame.renderOrder = -1; // フレームを背面に
       group.add(frame);
 
       if (node.type === 'video') {
@@ -6659,130 +6646,94 @@ async function initDocMenuTable() {
 
       const resourceKey = node.path || node.id || Math.random().toString(36);
       if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey: node.type === 'video' ? resourceKey : null, controls: null });
+      
+      // 初期状態：軽量なプレースホルダー表示（テクスチャなし）
+      // フレームだけ表示することで初期表示を軽くする
+      
       if (node.type === 'video') {
+        // ビデオは即座にプレースホルダーテクスチャを表示
+        spriteMaterial.map = createVideoPlaceholderTexture(node);
+        spriteMaterial.color.set(0xffffff);
+        spriteMaterial.opacity = 1;
+        spriteMaterial.needsUpdate = true;
+        
+        // 非同期でビデオリソースを読み込み（オプショナル）
         if (!graph3dVideoResources.has(resourceKey)) {
           graph3dVideoResources.set(resourceKey, loadVideoResource(node, resourceKey).catch((err) => { graph3dVideoResources.delete(resourceKey); throw err; }));
         }
         graph3dVideoResources.get(resourceKey)
           .then((resource) => {
-            spriteMaterial.map = resource.texture;
-            spriteMaterial.color.set(0xffffff);
-            spriteMaterial.opacity = 1;
-            spriteMaterial.needsUpdate = true;
+            // ビデオテクスチャは準備だけして、再生はユーザー操作時
             if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey, controls: resource });
           })
-          .catch(() => {
-            spriteMaterial.map = createVideoPlaceholderTexture(node);
-            spriteMaterial.color.set(0xffffff);
-            spriteMaterial.opacity = 1;
-            spriteMaterial.needsUpdate = true;
-          });
+          .catch(() => {});
       } else {
+        // 画像は即座に読み込み開始（プロミスキャッシュで管理）
         if (!graph3dMediaTexturePromises.has(resourceKey)) {
-          graph3dMediaTexturePromises.set(resourceKey, loadImageTexture(node).catch((err) => { graph3dMediaTexturePromises.delete(resourceKey); throw err; }));
+          // 即座に読み込み開始
+          const texturePromise = loadImageTexture(node).catch(() => null);
+          graph3dMediaTexturePromises.set(resourceKey, texturePromise);
         }
-        graph3dMediaTexturePromises.get(resourceKey)
-          .then((texture) => {
-            spriteMaterial.map = texture;
-            spriteMaterial.color.set(0xffffff);
-            spriteMaterial.opacity = style.isHighlight ? 1 : (style.shouldDim ? 0.85 : 0.97);
-            spriteMaterial.needsUpdate = true;
-            if (cacheKey) graph3dNodeObjectCache.set(cacheKey, { object: group, resourceKey: null, controls: null });
-          })
-          .catch(() => {
-            spriteMaterial.color.set('#334155');
-            spriteMaterial.opacity = 0.85;
-          });
-        return group;
+        
+        // テクスチャが読み込まれたら適用
+        graph3dMediaTexturePromises.get(resourceKey).then((texture) => {
+          if (texture && spriteMaterial && sprite) {
+            // オブジェクトがまだ存在することを確認
+            requestAnimationFrame(() => {
+              if (spriteMaterial && !spriteMaterial.map) {
+                spriteMaterial.map = texture;
+                spriteMaterial.color.set(0xffffff);
+                spriteMaterial.opacity = style.isHighlight ? 1 : (style.shouldDim ? 0.85 : 0.97);
+                spriteMaterial.needsUpdate = true;
+              }
+            });
+          }
+        });
       }
 
       return group;
     }
     
-    // メディアノードを段階的に読み込む
+    // メディアノードを段階的に読み込む（削除予定・使用しない）
     function startGraph3dMediaLoading() {
-      if (graph3dMediaLoadingEnabled || !graph3dInstance || !graph3dDataCache) return;
-      
-      console.log('[TaskBoard] Starting delayed media loading...');
-      graph3dMediaLoadingEnabled = true;
-      
-      // メディアノードを収集
-      graph3dMediaLoadingQueue = [];
-      if (Array.isArray(graph3dDataCache.nodes)) {
-        graph3dDataCache.nodes.forEach(node => {
-          if (isGraph3dMediaNode(node)) {
-            graph3dMediaLoadingQueue.push(node);
-          }
-        });
-      }
-      
-      const totalMedia = graph3dMediaLoadingQueue.length;
-      console.log(`[TaskBoard] Found ${totalMedia} media nodes to load`);
-      
-      if (totalMedia > 0) {
-        graph3dSetStatus(`メディアを読み込み中... (0/${totalMedia})`, 'loading');
-        processGraph3dMediaQueue();
-      }
+      // この関数は使用しない - メディアは個別に非同期で読み込まれる
+      return;
     }
     
-    // メディアキューを処理
+    // メディアキューを処理（削除予定・使用しない）
     function processGraph3dMediaQueue() {
-      if (graph3dMediaLoadingInProgress || graph3dMediaLoadingQueue.length === 0) return;
-      
-      graph3dMediaLoadingInProgress = true;
-      const remainingTotal = graph3dMediaLoadingQueue.length;
-      const batch = graph3dMediaLoadingQueue.splice(0, GRAPH3D_MEDIA_BATCH_SIZE);
-      
-      // 全体の総数を計算（元の総数を保持）
-      const originalTotal = Array.isArray(graph3dDataCache?.nodes) ? 
-        graph3dDataCache.nodes.filter(isGraph3dMediaNode).length : 0;
-      const loaded = originalTotal - remainingTotal;
-      
-      console.log(`[TaskBoard] Loading batch of ${batch.length} media nodes`);
-      
-      batch.forEach(node => {
-        const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
-        const cacheKey = node && node.id != null ? `${mode}:${node.id}` : null;
-        
-        // プレースホルダーを削除
-        if (cacheKey && graph3dNodeObjectCache.has(cacheKey)) {
-          const cached = graph3dNodeObjectCache.get(cacheKey);
-          if (cached?.isPlaceholder) {
-            graph3dNodeObjectCache.delete(cacheKey);
-          }
-        }
-      });
-      
-      // ノードオブジェクトを更新
-      refreshGraph3dNodeObjects({ force: false });
-      
-      // 進捗を更新
-      const newLoaded = loaded + batch.length;
-      graph3dSetStatus(`メディアを読み込み中... (${newLoaded}/${originalTotal})`, 'loading');
-      
-      // 次のバッチを処理
-      setTimeout(() => {
-        graph3dMediaLoadingInProgress = false;
-        if (graph3dMediaLoadingQueue.length > 0) {
-          processGraph3dMediaQueue();
-        } else {
-          console.log('[TaskBoard] All media nodes loaded');
-          graph3dSetStatus('メディアの読み込みが完了しました', 'success');
-          // 成功メッセージを2秒後に消す
-          setTimeout(() => {
-            graph3dSetStatus('', 'success');
-          }, 2000);
-        }
-      }, 100); // バッチ間の待機時間
+      // この関数は使用しない
+      return;
     }
 
     function buildGraph3dNodeObject(node) {
       if (!node) return null;
       const mode = normalizeGraph3dViewMode(state.graph3dViewMode);
       const cacheKey = node && node.id != null ? `${mode}:${node.id}` : null;
-      const baseObject = (mode === 'media' && isGraph3dMediaNode(node))
-        ? getGraph3dMediaObject(node, cacheKey)
-        : getGraph3dSphereObject(node, cacheKey);
+      
+      let baseObject;
+      
+      // メディアモードでメディアノードの場合
+      if (mode === 'media' && isGraph3dMediaNode(node)) {
+        try {
+          baseObject = getGraph3dMediaObject(node, cacheKey);
+          if (!baseObject) {
+            console.warn('[TaskBoard] Failed to create media object for node, falling back to sphere:', node.id, node.type);
+            baseObject = getGraph3dSphereObject(node, cacheKey);
+          }
+        } catch (err) {
+          console.error('[TaskBoard] Error creating media object:', err);
+          baseObject = getGraph3dSphereObject(node, cacheKey);
+        }
+      } else {
+        // それ以外は球体
+        baseObject = getGraph3dSphereObject(node, cacheKey);
+      }
+      
+      if (!baseObject) {
+        console.error('[TaskBoard] No base object created for node:', node.id, node.type, mode);
+        return null;
+      }
       
       const isHighlighted = graph3dActiveHighlightNodeIds.has(node.id);
       const ambientActive = state.graph3dDimInactive === false;
@@ -6817,7 +6768,11 @@ async function initDocMenuTable() {
     }
 
     function refreshGraph3dNodeObjects({ force = false } = {}) {
-      if (!graph3dInstance || typeof graph3dInstance.nodeThreeObject !== 'function') return;
+      console.log('[TaskBoard] refreshGraph3dNodeObjects called, force:', force);
+      if (!graph3dInstance || typeof graph3dInstance.nodeThreeObject !== 'function') {
+        console.warn('[TaskBoard] Cannot refresh node objects - graph3dInstance not ready');
+        return;
+      }
       clearGraph3dHighlightMeshes();
       if (force) {
         stopGraph3dActiveVideo();
@@ -6840,7 +6795,20 @@ async function initDocMenuTable() {
         });
         graph3dVideoResources.clear();
       }
-      graph3dInstance.nodeThreeObject((node) => buildGraph3dNodeObject(node));
+      let nodeCount = 0;
+      let mediaNodeCount = 0;
+      graph3dInstance.nodeThreeObject((node) => {
+        nodeCount++;
+        if (isGraph3dMediaNode(node)) {
+          mediaNodeCount++;
+        }
+        const obj = buildGraph3dNodeObject(node);
+        if (!obj && isGraph3dMediaNode(node)) {
+          console.error('[TaskBoard] Failed to build media node object:', node.id, node.type);
+        }
+        return obj;
+      });
+      console.log(`[TaskBoard] refreshGraph3dNodeObjects - Node objects: ${nodeCount} total, ${mediaNodeCount} media nodes, mode: ${normalizeGraph3dViewMode(state.graph3dViewMode)}`);
       if (typeof graph3dInstance.refresh === 'function') {
         graph3dInstance.refresh();
       }
@@ -6889,13 +6857,6 @@ async function initDocMenuTable() {
       if (state.graph3dViewMode === normalized) return;
       state.graph3dViewMode = normalized;
       updateGraph3dModeToggle();
-      
-      // メディアモードに切り替わった時の処理
-      if (normalized === 'media' && !graph3dMediaLoadingEnabled && graph3dHasInitialFit) {
-        // 即座にメディア読み込みを開始
-        startGraph3dMediaLoading();
-      }
-      
       refreshGraph3dNodeObjects({ force: true });
       schedulePersist();
       hideGraph3dContextMenu();
@@ -7296,6 +7257,7 @@ async function initDocMenuTable() {
     }
 
     function setupGraph3dScene(ForceGraphFactory, data) {
+      console.log('[TaskBoard] setupGraph3dScene called');
       if (!graph3dCanvasEl) return;
       stopGraph3dActiveVideo();
       graph3dVideoResources.forEach((promise) => {
@@ -7337,10 +7299,6 @@ async function initDocMenuTable() {
       console.log('[TaskBoard] 3D graph instance created successfully');
       graph3dAutoFitLocked = false;
       graph3dHasInitialFit = false;
-      // メディア読み込み状態をリセット
-      graph3dMediaLoadingEnabled = false;
-      graph3dMediaLoadingQueue = [];
-      graph3dMediaLoadingInProgress = false;
       const focusGraph3dCameraOnNode = (targetNode, { distance = 180, duration = 600 } = {}) => {
         if (!targetNode || !Graph || typeof Graph.cameraPosition !== 'function') return;
         const camera = typeof Graph.camera === 'function' ? Graph.camera() : null;
@@ -7476,14 +7434,34 @@ async function initDocMenuTable() {
       if (typeof Graph.nodeThreeObjectExtend === 'function') {
         try { Graph.nodeThreeObjectExtend(false); } catch (_) {}
       }
+      
+      // ノードオブジェクトの作成関数を設定
+      let nodeCount = 0;
+      let mediaNodeCount = 0;
+      Graph.nodeThreeObject((node) => {
+        nodeCount++;
+        if (isGraph3dMediaNode(node)) {
+          mediaNodeCount++;
+        }
+        const obj = buildGraph3dNodeObject(node);
+        if (!obj && isGraph3dMediaNode(node)) {
+          console.error('[TaskBoard] Failed to build media node object:', node.id, node.type);
+        }
+        return obj;
+      });
+      
       if (window.THREE) {
         graph3dSphereGeometry = new THREE.SphereGeometry(1, 36, 36);
       } else {
         graph3dSphereGeometry = null;
       }
       graph3dMediaTexturePromises.clear();
-      refreshGraph3dNodeObjects({ force: true });
       refreshGraph3dSearchResults({ keepIndex: true });
+      
+      console.log(`[TaskBoard] setupGraph3dScene - Node objects: ${nodeCount} total, ${mediaNodeCount} media nodes, mode: ${normalizeGraph3dViewMode(state.graph3dViewMode)}`);
+      
+      // ブルームエフェクトの更新
+      updateGraph3dBloomIntensity();
 
       try {
         Graph.d3Force('link').distance(48);
@@ -7509,13 +7487,6 @@ async function initDocMenuTable() {
             Graph.cameraPosition({ x: 0, y: 0, z: 900 }, { x: 0, y: 0, z: 0 }, 0);
             Graph.zoomToFit(600, 120);
             graph3dHasInitialFit = true;
-            
-            // グラフが安定してからメディア読み込みを開始
-            if (!graph3dMediaLoadingEnabled) {
-              setTimeout(() => {
-                startGraph3dMediaLoading();
-              }, GRAPH3D_MEDIA_LOAD_DELAY);
-            }
           } catch (_) {}
         }, delay);
       };
@@ -7592,8 +7563,10 @@ async function initDocMenuTable() {
           } else if ('outputEncoding' in graph3dRenderer && window.THREE.sRGBEncoding) {
             graph3dRenderer.outputEncoding = window.THREE.sRGBEncoding;
           }
-          graph3dRenderer.physicallyCorrectLights = true;
-          graph3dRenderer.useLegacyLights = false;
+          // Three.js r155以降のライティングモデルを使用
+          if ('useLegacyLights' in graph3dRenderer) {
+            graph3dRenderer.useLegacyLights = false;
+          }
           graph3dRenderer.toneMapping = window.THREE.ReinhardToneMapping;
           graph3dRenderer.toneMappingExposure = GRAPH3D_EXPOSURE_DEFAULT;
         }
@@ -7661,10 +7634,22 @@ async function initDocMenuTable() {
             graph3dCanvasContainer.parentNode.removeChild(graph3dCanvasContainer);
           }
           graph3dCanvasContainer = null;
-          // メディア読み込み状態もリセット
-          graph3dMediaLoadingEnabled = false;
-          graph3dMediaLoadingQueue = [];
-          graph3dMediaLoadingInProgress = false;
+          // 画像読み込みキューもクリア
+          graph3dImageLoadQueue = [];
+          graph3dActiveImageLoads = 0;
+          // メディアテクスチャのプロミスキャッシュもクリア（重要！）
+          graph3dMediaTexturePromises.clear();
+          // ノードオブジェクトキャッシュもクリア
+          graph3dNodeObjectCache.clear();
+          // ビデオリソースもクリア
+          graph3dVideoResources.forEach((promise) => {
+            promise.then((resource) => {
+              if (resource && typeof resource.dispose === 'function') {
+                resource.dispose();
+              }
+            }).catch(() => {});
+          });
+          graph3dVideoResources.clear();
         }
         if (graph3dSearchInputEl && graph3dSearchInputEl.value && graph3dSearchInputEl.value.trim()) {
           renderGraph3dSearchMessage('3Dデータを解析中です...');
@@ -7689,6 +7674,7 @@ async function initDocMenuTable() {
           console.log('[Taskboard][3D] graph data', { nodes: nodeCount, links: linkCount, baseDir: data?.baseDir });
           if (graph3dBaseEl) graph3dBaseEl.textContent = data.baseDir || '-';
           updateGraph3dStats(data.stats, data.totals);
+          console.log('[TaskBoard] About to call setupGraph3dScene, forceReload:', forceReload);
           setupGraph3dScene(ForceGraphFactory, data);
           updateHighlightPaletteUI();
           applyGraph3dHighlightNodes();
@@ -7873,9 +7859,6 @@ async function initDocMenuTable() {
         graph3dRenderer = null;
         graph3dBloomPass = null;
         hideGraph3dHoverPalette({ force: true });
-        // メディア読み込みを中断
-        graph3dMediaLoadingQueue = [];
-        graph3dMediaLoadingInProgress = false;
         graph3dSetStatus('', 'info');
       }
     }
@@ -8411,14 +8394,19 @@ async function initDocMenuTable() {
           // 再読み込み完了後、3Dビューを再レンダリング
           renderGraph3dPanel();
           
-          // 3Dインスタンスのリフレッシュを強制
-          if (result && typeof result.refresh === 'function') {
+          // ノードオブジェクトを強制的に再作成
+          if (result && graph3dInstance) {
             setTimeout(() => {
               try {
+                refreshGraph3dNodeObjects({ force: true });
+                console.log('[TaskBoard] Node objects refreshed after reload');
+              } catch (err) {
+                console.warn('[TaskBoard] Failed to refresh node objects:', err);
+              }
+              
+              if (typeof result.refresh === 'function') {
                 result.refresh();
                 console.log('[TaskBoard] 3D view refreshed after reload');
-              } catch (err) {
-                console.warn('[TaskBoard] Failed to refresh 3D view:', err);
               }
             }, 100);
           }
