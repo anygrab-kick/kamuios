@@ -612,9 +612,9 @@ pre.code code { color: var(--text); }
 .taskboard-panel {
   position: fixed;
   right: 18px;
-  bottom: 74px;
+  bottom: 18px;
   width: min(440px, 92vw);
-  max-height: min(84vh, 760px);
+  max-height: calc(100vh - 36px);
   background: rgba(17,24,39,0.55);
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: 14px;
@@ -3324,7 +3324,7 @@ pre.code code { color: var(--text); }
 }
 
 @media (max-width: 768px) {
-  .taskboard-panel { right: 12px; left: 12px; width: auto; max-height: min(62vh, 520px); }
+  .taskboard-panel { right: 12px; left: 12px; width: auto; bottom: 12px; max-height: calc(100vh - 24px); }
   .taskboard-toggle { right: 12px; bottom: 12px; }
   .mcp-suggest { width: calc(100vw - 24px) !important; left: 50% !important; transform: translateX(-50%) !important; }
 }
