@@ -3323,10 +3323,182 @@ pre.code code { color: var(--text); }
   color: #1e293b;
 }
 
+/* タスクボード拡大モード */
+.taskboard-panel.expanded {
+  right: 40px;
+  bottom: 40px;
+  left: 40px;
+  width: auto;
+  max-width: 1400px;
+  height: calc(100vh - 80px);
+  max-height: 900px;
+  display: flex;
+  flex-direction: column;
+}
+
+.taskboard-panel.expanded .taskboard-header {
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+
+.taskboard-panel.expanded .tb-expand svg {
+  transform: rotate(180deg);
+  transition: transform 0.3s ease;
+}
+
+/* トランジション効果 */
+.taskboard-panel {
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              left 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              right 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              bottom 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tb-expand svg {
+  transition: transform 0.3s ease;
+}
+
+/* 拡大時のコンテンツレイアウト */
+.taskboard-panel.expanded .taskboard-content-wrapper {
+  display: flex !important; /* contentsを上書き */
+  height: calc(100% - 48px); /* ヘッダー分を引く */
+  gap: 16px;
+  padding: 16px;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+}
+
+.taskboard-panel.expanded .taskboard-left-panel {
+  flex: 2;
+  display: flex !important; /* contentsを上書き */
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.taskboard-panel.expanded .taskboard-right-panel {
+  flex: 1;
+  display: flex !important; /* contentsを上書き */
+  flex-direction: column;
+  gap: 12px;
+  min-width: 280px;
+  max-width: 400px;
+  overflow-y: auto;
+}
+
+/* 拡大モードでの3Dビュー */
+.taskboard-panel.expanded .taskboard-3d {
+  margin: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.taskboard-panel.expanded .tb-3d-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.taskboard-panel.expanded .tb-3d-canvas {
+  flex: 1;
+  min-height: 400px;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 拡大モードでのタスクリスト */
+.taskboard-panel.expanded .taskboard-list {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  overflow-y: auto;
+  max-height: none;
+  background: rgba(15, 23, 42, 0.35);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+[data-theme="light"] .taskboard-panel.expanded .taskboard-list {
+  background: rgba(241, 245, 249, 0.7);
+  border-color: rgba(203, 213, 225, 0.5);
+}
+
+.taskboard-panel.expanded .taskboard-right-panel .taskboard-compose {
+  margin: 0;
+  flex-shrink: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(15, 23, 42, 0.72);
+  display: flex !important;
+  flex-direction: column;
+}
+
+[data-theme="light"] .taskboard-panel.expanded .taskboard-compose {
+  background: rgba(241, 245, 249, 0.9);
+  border-color: rgba(203, 213, 225, 0.65);
+}
+
+/* 拡大モードで直接の子要素を非表示 */
+.taskboard-panel.expanded > .taskboard-analytics,
+.taskboard-panel.expanded > .taskboard-list,
+.taskboard-panel.expanded > .taskboard-compose {
+  display: none !important;
+}
+
+/* 拡大時のタスク一覧タイトル */
+.taskboard-expanded-title {
+  display: none;
+}
+
+.taskboard-panel.expanded .taskboard-expanded-title {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  padding: 0 12px 8px;
+  opacity: 0.9;
+}
+
+/* 通常モードではコンテンツラッパーを使わない */
+.taskboard-content-wrapper {
+  display: contents;
+}
+
+.taskboard-left-panel,
+.taskboard-right-panel {
+  display: contents;
+}
+
 @media (max-width: 768px) {
   .taskboard-panel { right: 12px; left: 12px; width: auto; bottom: 12px; max-height: calc(100vh - 24px); }
   .taskboard-toggle { right: 12px; bottom: 12px; }
   .mcp-suggest { width: calc(100vw - 24px) !important; left: 50% !important; transform: translateX(-50%) !important; }
+  
+  /* モバイルでの拡大モード調整 */
+  .taskboard-panel.expanded {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    height: calc(100vh - 24px);
+  }
+  
+  .taskboard-panel.expanded .taskboard-content-wrapper {
+    flex-direction: column;
+    padding: 12px;
+  }
+  
+  .taskboard-panel.expanded .taskboard-right-panel {
+    max-width: none;
+    flex: none;
+  }
 }
 
 /* 実行中のアイコンアニメーション */

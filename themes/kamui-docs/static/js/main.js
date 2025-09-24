@@ -4953,7 +4953,8 @@ async function initDocMenuTable() {
             graph3dManualHighlights: Array.from(graph3dHighlightColorByPath.entries()),
             graph3dActiveHighlightColor: ensureActiveHighlightColor(),
             composeImportance: normalizePriorityLevel(state.composeImportance, 'medium'),
-            composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium')
+            composeUrgency: normalizePriorityLevel(state.composeUrgency, 'medium'),
+            isExpanded: !!state.isExpanded
           };
           const savedAt = storageModule.save(payload);
           if (savedAt) {
@@ -4992,6 +4993,10 @@ async function initDocMenuTable() {
           }
           if (typeof saved.graph3dCollapsed === 'boolean') {
             state.graph3dCollapsed = saved.graph3dCollapsed;
+          }
+          if (typeof saved.isExpanded === 'boolean') {
+            state.isExpanded = saved.isExpanded;
+            isExpanded = saved.isExpanded;
           }
           if (typeof saved.graph3dViewMode === 'string') {
             state.graph3dViewMode = normalizeGraph3dViewMode(saved.graph3dViewMode);
@@ -5103,6 +5108,44 @@ async function initDocMenuTable() {
       loadPersistedState();
       ensureRequiredModelOptions();
       ensureActiveModel();
+      
+      // 保存された拡大状態を適用
+      if (state.isExpanded) {
+        isExpanded = true;
+        panel.classList.add('expanded');
+        const expandBtn = panel.querySelector('#taskboardExpandToggle');
+        if (expandBtn) {
+          expandBtn.setAttribute('aria-label', '縮小');
+          expandBtn.setAttribute('title', '縮小');
+        }
+        
+        // 拡大モード時の要素配置を初期化
+        setTimeout(() => {
+          const contentWrapper = panel.querySelector('.taskboard-content-wrapper');
+          const leftPanel = panel.querySelector('.taskboard-left-panel');
+          const rightPanel = panel.querySelector('.taskboard-right-panel');
+          const analytics = panel.querySelector('.taskboard-analytics');
+          const taskList = panel.querySelector('#taskboardList');
+          const compose = panel.querySelector('.taskboard-compose');
+          const taskboard3d = panel.querySelector('#taskboard3d');
+          
+          if (taskboard3d && leftPanel) {
+            leftPanel.appendChild(taskboard3d);
+          }
+          if (taskList && rightPanel) {
+            // タイトルの後に追加
+            const expandedTitle = rightPanel.querySelector('.taskboard-expanded-title');
+            if (expandedTitle) {
+              expandedTitle.insertAdjacentElement('afterend', taskList);
+            } else {
+              rightPanel.appendChild(taskList);
+            }
+          }
+          if (compose && rightPanel) {
+            rightPanel.appendChild(compose);
+          }
+        }, 100);
+      }
 
       window.addEventListener('beforeunload', () => {
         persistNow();
@@ -5289,7 +5332,18 @@ async function initDocMenuTable() {
           <button type="button" id="taskboard3dToggle" class="tb-3d-toggle" aria-expanded="false" aria-label="3Dシステム" title="3Dシステム"><span class="tb-toggle-icon" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2.4 4 5.2v6.4L10 14.4l6-2.8V5.2L10 2.4Z" fill="currentColor" opacity="0.14"></path><path d="M10 2.4 4 5.2v6.4L10 14.4l6-2.8V5.2L10 2.4Zm0 0v12M4 5.2l6 2.8m6-2.8-6 2.8"/></svg></span><span class="tb-toggle-label">3Dシステム</span></button>
         </div>
         <div class="tb-actions">
+          <button type="button" id="taskboardExpandToggle" class="tb-btn tb-expand" aria-label="拡大" title="拡大">
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+              <path d="M3 7V3h4M17 7V3h-4M17 13v4h-4M3 13v4h4"/>
+            </svg>
+          </button>
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
+        </div>
+      </div>
+      <div class="taskboard-content-wrapper">
+        <div class="taskboard-left-panel"></div>
+        <div class="taskboard-right-panel">
+          <div class="taskboard-expanded-title">タスク一覧</div>
         </div>
       </div>
       <div class="taskboard-analytics">
@@ -7843,6 +7897,17 @@ async function initDocMenuTable() {
     }
     updateSyncStatusFromState('info');
     updateModelBadge();
+    
+    // 初回レンダリング（すべての要素が初期化された後）
+    setTimeout(() => {
+      render();
+      // タスクボードが開いている場合は表示状態を更新
+      if (state.open) {
+        panel.classList.add('open');
+        panel.setAttribute('aria-hidden', 'false');
+        toggleBtn.setAttribute('aria-pressed', 'true');
+      }
+    }, 100);
     if (importanceEl) {
       importanceEl.value = normalizePriorityLevel(state.composeImportance, 'medium');
       importanceEl.addEventListener('change', (event) => {
@@ -9836,10 +9901,82 @@ async function initDocMenuTable() {
       panel.setAttribute('aria-hidden', state.open ? 'false' : 'true');
       toggleBtn.setAttribute('aria-pressed', state.open ? 'true' : 'false');
       schedulePersist();
+      if (state.open) {
+        render();
+      }
     }
 
     toggleBtn.addEventListener('click', () => setOpen(!state.open));
     hideEl?.addEventListener('click', () => setOpen(false));
+    
+    // 拡大ボタンのイベント処理
+    const expandBtn = panel.querySelector('#taskboardExpandToggle');
+    let isExpanded = false;
+    
+    expandBtn?.addEventListener('click', () => {
+      isExpanded = !isExpanded;
+      panel.classList.toggle('expanded', isExpanded);
+      expandBtn.setAttribute('aria-label', isExpanded ? '縮小' : '拡大');
+      expandBtn.setAttribute('title', isExpanded ? '縮小' : '拡大');
+      
+      // 拡大モード時の要素移動
+      const contentWrapper = panel.querySelector('.taskboard-content-wrapper');
+      const leftPanel = panel.querySelector('.taskboard-left-panel');
+      const rightPanel = panel.querySelector('.taskboard-right-panel');
+      const analytics = panel.querySelector('.taskboard-analytics');
+      const taskList = panel.querySelector('#taskboardList');
+      const compose = panel.querySelector('.taskboard-compose');
+      const taskboard3d = panel.querySelector('#taskboard3d');
+      
+      if (isExpanded) {
+        // 拡大モード: 要素を移動
+        if (taskboard3d && leftPanel) {
+          leftPanel.appendChild(taskboard3d);
+        }
+        if (taskList && rightPanel) {
+          // タイトルの後に追加
+          const expandedTitle = rightPanel.querySelector('.taskboard-expanded-title');
+          if (expandedTitle) {
+            expandedTitle.insertAdjacentElement('afterend', taskList);
+          } else {
+            rightPanel.appendChild(taskList);
+          }
+        }
+        if (compose && rightPanel) {
+          rightPanel.appendChild(compose);
+        }
+      } else {
+        // 通常モード: 要素を元の位置に戻す
+        if (taskboard3d && analytics) {
+          analytics.appendChild(taskboard3d);
+        }
+        if (taskList && panel) {
+          // analyticsの後に挿入
+          analytics.insertAdjacentElement('afterend', taskList);
+        }
+        if (compose && panel) {
+          // taskListの後に挿入
+          taskList.insertAdjacentElement('afterend', compose);
+        }
+      }
+      
+      // 3Dビューのリサイズ処理
+      if (isExpanded && graph3dInitialized && window.Graph3D) {
+        setTimeout(() => {
+          try {
+            if (window.Graph3D && typeof window.Graph3D.refresh === 'function') {
+              window.Graph3D.refresh();
+            }
+          } catch (err) {
+            console.warn('[TaskBoard] Failed to refresh 3D view:', err);
+          }
+        }, 300);
+      }
+      
+      // 拡大状態を永続化
+      state.isExpanded = isExpanded;
+      schedulePersist();
+    });
     runEl?.addEventListener('click', () => {
       const v = inputEl?.value;
       if (inputEl) inputEl.value = '';
