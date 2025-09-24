@@ -5119,32 +5119,7 @@ async function initDocMenuTable() {
           expandBtn.setAttribute('title', '縮小');
         }
         
-        // 拡大モード時の要素配置を初期化
-        setTimeout(() => {
-          const contentWrapper = panel.querySelector('.taskboard-content-wrapper');
-          const leftPanel = panel.querySelector('.taskboard-left-panel');
-          const rightPanel = panel.querySelector('.taskboard-right-panel');
-          const analytics = panel.querySelector('.taskboard-analytics');
-          const taskList = panel.querySelector('#taskboardList');
-          const compose = panel.querySelector('.taskboard-compose');
-          const taskboard3d = panel.querySelector('#taskboard3d');
-          
-          if (taskboard3d && leftPanel) {
-            leftPanel.appendChild(taskboard3d);
-          }
-          if (taskList && rightPanel) {
-            // タイトルの後に追加
-            const expandedTitle = rightPanel.querySelector('.taskboard-expanded-title');
-            if (expandedTitle) {
-              expandedTitle.insertAdjacentElement('afterend', taskList);
-            } else {
-              rightPanel.appendChild(taskList);
-            }
-          }
-          if (compose && rightPanel) {
-            rightPanel.appendChild(compose);
-          }
-        }, 100);
+        // DOM移動は行わない（CSSで対応）
       }
 
       window.addEventListener('beforeunload', () => {
@@ -5338,12 +5313,6 @@ async function initDocMenuTable() {
             </svg>
           </button>
           <button type="button" class="tb-btn tb-hide" aria-label="閉じる" title="閉じる">×</button>
-        </div>
-      </div>
-      <div class="taskboard-content-wrapper">
-        <div class="taskboard-left-panel"></div>
-        <div class="taskboard-right-panel">
-          <div class="taskboard-expanded-title">タスク一覧</div>
         </div>
       </div>
       <div class="taskboard-analytics">
@@ -9928,37 +9897,7 @@ async function initDocMenuTable() {
       const compose = panel.querySelector('.taskboard-compose');
       const taskboard3d = panel.querySelector('#taskboard3d');
       
-      if (isExpanded) {
-        // 拡大モード: 要素を移動
-        if (taskboard3d && leftPanel) {
-          leftPanel.appendChild(taskboard3d);
-        }
-        if (taskList && rightPanel) {
-          // タイトルの後に追加
-          const expandedTitle = rightPanel.querySelector('.taskboard-expanded-title');
-          if (expandedTitle) {
-            expandedTitle.insertAdjacentElement('afterend', taskList);
-          } else {
-            rightPanel.appendChild(taskList);
-          }
-        }
-        if (compose && rightPanel) {
-          rightPanel.appendChild(compose);
-        }
-      } else {
-        // 通常モード: 要素を元の位置に戻す
-        if (taskboard3d && analytics) {
-          analytics.appendChild(taskboard3d);
-        }
-        if (taskList && panel) {
-          // analyticsの後に挿入
-          analytics.insertAdjacentElement('afterend', taskList);
-        }
-        if (compose && panel) {
-          // taskListの後に挿入
-          taskList.insertAdjacentElement('afterend', compose);
-        }
-      }
+      // DOM移動は行わず、CSSクラスの切り替えのみ行う
       
       // 3Dビューのリサイズ処理
       if (isExpanded && graph3dInitialized && window.Graph3D) {
