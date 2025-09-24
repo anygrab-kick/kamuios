@@ -3329,7 +3329,7 @@ pre.code code { color: var(--text); }
   bottom: 40px;
   left: 40px;
   width: auto;
-  max-width: 1400px;
+  max-width: calc(100vw - 80px); /* 画面幅に合わせて拡大 */
   height: calc(100vh - 80px);
   max-height: 900px;
   display: flex;
